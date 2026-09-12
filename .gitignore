@@ -55,6 +55,12 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Custom
+.local/
+__pycache__/
+*.pyc
+
 /.idea/
 /access_token.json
 /config.json
