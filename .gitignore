@@ -57,12 +57,8 @@ TestResult.xml
 nunit-*.xml
 /.idea/
 /access_token.json
-/plugins/allure
 /config.json
 /dp.lock
-/plugins/gitlab
-/plugins/jira
 /lock
 /refresh.lock
-/plugins/sage
-/plugins/wixie
+/plugins/
