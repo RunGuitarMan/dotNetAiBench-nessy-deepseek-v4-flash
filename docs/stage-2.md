@@ -1,259 +1,371 @@
-# stage-2 — Motiva: архитектура и API
+# stage-2 — Motiva: архитектура и API (редакция 2)
 
-Входы (доступные в окружении): `docs/01_BUSINESS.md` (B01–B37/E01–E12), утверждённый `docs/stage-1.md` (редакция 3), `.editorconfig` (C#/.NET). Заявленные входы «инженерные условия» и «договор JWT» **в окружении отсутствуют** — принятые допущения по ним явно вынесены в §8 и §9 и не выдаются за решение организатора.
-
-Стек-допущение из `.editorconfig` (`[*.cs]`, file-scoped namespaces): **C# / .NET, ASP.NET Core, PostgreSQL**, REST + OpenAPI. Это предположение; альтернативы без входов не оцениваются.
+Входы: бизнес-задание v3.0 (`B01–B37/E01–E12`), инженерные условия `T01–T10` и договор JWT (получены в этом задании), `.editorconfig`, утверждённый `stage-1.md` (используется как анализ требований, не переопределяет задание). Проектирование; реализация, миграции и план разработки не выполняются.
 
 ---
 
-## 1. Границы модулей/проектов, слои, сборка
+## 0. Входы и закрытие прежних вопросов
 
-### 1.1 Состав проектов (допущение «минимальных проектов» — см. §9)
+- **C1–C3 (ранее) сняты:** договор JWT и инженерные условия получены в настоящем задании; отсутствие `openapi.yaml` до этапа 2 — не противоречие, а задание этапа. Физически непрочитанных файлов не заявляется.
+- **RA1 закрыт (T04):** top N по умолчанию 50, диапазон 1–100; собственное место — отдельная операция (`own`).
+- **RA2 закрыт (T05):** произвольный корректный интервал `[from,to)`, `from < to`, без выравнивания; даты с UTC offset, выход UTC.
+- **RA4 — явное уточнение (принимается в этом документе, бизнес-задание молча не переписывается):** отмену начисления или списания **заблокированного** получателя выполняет **только Admin**; владелец и интеграция это исключение не используют. Для активного получателя действуют обычные B26–B27. Ограничения достаточности средств и полной отмены сохраняются. Отражено в §5.4 и политике доступа §8.
 
+---
+
+## 1. Стек и состав проектов (T01–T02)
+
+### 1.1 Стек (фиксируется, версии — см. §1.4)
+**.NET 10 / ASP.NET Core**, **EF Core 10 + Npgsql**, **PostgreSQL 17**, **Valkey 9**, приватное **S3-совместимое хранилище**. PostgreSQL не заменяется другой БД, Valkey — памятью, S3 — локальной ФС.
+
+### 1.2 Минимальные проекты и границы
 ```
 Motiva.sln
 ├── src
-│   ├── Motiva.Domain         # доменные сущности, правила, инварианты (без внешних зависимостей)
-│   ├── Motiva.Application    # use-case сценарии, оркестрация, абстракции-порты
-│   ├── Motiva.Infrastructure # PostgreSQL, выписки (файлы), интеграции, JWT-провайдер
-│   └── Motiva.Web            # ASP.NET Core: контроллеры, DI-сборка (Composition Root)
+│   ├── Motiva.Domain          # чистые доменные правила, агрегаты, календарь периодов, диапазоны
+│   ├── Motiva.Application     # use case, оркестрация, порты, авторизация действий
+│   ├── Motiva.Infrastructure  # PostgreSQL (EF/Npgsql), Valkey, S3, генератор CSV, JWT-провайдер
+│   ├── Motiva.Api             # ASP.NET Core: маршрутизация, DTO, middleware, composition root
+│   └── Motiva.Worker          # фоновые процессы: выписки, очистка S3, публикация рейтинга
 └── tests
-    ├── Motiva.Tests.Unit       # домен/application (моки портов)
-    └── Motiva.Tests.Integration# БД-транзакции, конкуренция, выписки
+    ├── Motiva.Tests.Unit            # домен/application (моки портов)
+    ├── Motiva.Tests.Integration     # PostgreSQL 17, Valkey 9, S3 (функциональные, HTTP/contract, persistence)
+    └── Motiva.Tests.Architecture    # архитектурные и отрицательные проверки
 ```
+Дополнительный `Motiva.Contracts` допустим только при обоснованной необходимости (напр., разделение DTO между Api и Integration-тестами); по умолчанию DTO живут в Application/Api.
 
-### 1.2 Направленные зависимости
-`Web → Application → Domain ← Infrastructure`, `Infrastructure → Application` (реализует порты), `Infrastructure → Domain`. Domain не зависит ни от чего. Application не зависит от Infrastructure (через порты). Web — единственное место сборки (Composition Root): регистрирует реализацию портов из Infrastructure в контейнер и подключает middleware.
+### 1.3 Зависимости и сборка
+`Api → Application`, `Api → Infrastructure`, `Worker → Application`, `Worker → Infrastructure`, `Infrastructure → Application` (порты), `Application → Domain`, `Infrastructure → Domain`. Domain не зависит от EF/HTTP/SDK; Application — от инфраструктурных реализаций. Composition roots — в `Api` и `Worker`. Endpoint/worker orchestration не обращаются напрямую к `DbContext`/Npgsql/S3 SDK (только через use cases и порты). DTO не являются EF-entities; `IQueryable` не покидает хранилище. Внутри проектов — группировка по предметным функциям (Каталог, Выполнение, Кошелёк, Рейтинг, Экспорт, Доступ).
 
-### 1.3 Ответственность слоёв
-| Слой | Отвечает | Не отвечает |
-|---|---|---|
-| Domain | Сущности, значения, агрегаты, инварианты (цель, all-or-nothing, бюджет/баланс ≥ 0), календарь периодов | Хранилище, HTTP, транзакции, JWT |
-| Application | Use-case: приём события, начисление, списание, отмена, публикация, выписка; координация портов; авторизация действий | SQL, детали СУБД, формат файлов |
-| Infrastructure | PostgreSQL-репозитории/транзакции, генератор и хранилище выписок, вызов интеграций, JWT-провайдер | Бизнес-правила |
-| Web | Маршрутизация, DTO, валидация ввода, ошибки (Problem Details), idempotency, сборка | Доменные правила |
+### 1.4 Фиксация версий и стиль
+- SDK, пакеты и образы фиксируются; lock-файлы (`packages.lock.json`, Compose-образы с тегами), без плавающего `latest`. Предложенные версии — проектные, не подтверждённые исполнением на этом этапе.
+- Миграции рассчитываются на PostgreSQL 17, включая обновление существующей БД.
+- Локальный S3-провайдер выбирается и обосновывается при реализации (кандидат — MinIO); совместимость «со всеми провайдерами» не обещается.
+- Стиль по `.editorconfig`: nullable, явная доступность, PascalCase типов/методов, camelCase параметров, `_camelCase` приватных полей, async I/O + `CancellationToken` по цепочке. Нет `.Result/.Wait()`, глобального подавления предупреждений и необоснованной смены стиля.
+- Проверки, обязательные для use case (авторизация, валидация, бизнес-повторы), выполняются в Application-входах, а не только в Web middleware — они сохраняются при вызове из Worker и функциональных тестов (D207/D211).
 
-### 1.4 Абстракции и решаемые проблемы
-| Абстракция (порт) | Решаемая проблема |
+### 1.5 Абстракции (порт → решаемая проблема)
+| Порт | Проблема |
 |---|---|
-| `IUnitOfWork` / `ITransactionScope` | Атомарность пакетной награды, бюджета, кошелька и движений (инварианты B17/B19/B20/B22). |
-| `IEventStore`, `IOperationStore` | Идемпотентность событий/операций по уникальному номеру (B16/B24) — через уникальные ключи и возврат исходного результата. |
-| `ITimeProvider` | Время принятия события определяется системой, а не источником (B14); часовой пояс компании (B10). |
-| `ICompanyCalendar` | Привязка периодов/сезона/соревнования к календарю компании (B10/B13/B33). |
-| `IWalletLedger` | Движения кошелька, объясняющие каждый баланс (B28), и агрегация общего остатка по ресурсу из разных кампаний (B22). |
-| `IRatingService` | Счёт челленджа = сумма зачтённых увеличений в интервале; фиксация итога (B31/B33). |
-| `IStatementGenerator` + `IStatementStore` | Асинхронное формирование выписки с фиксацией среза при первом успешном начале (B36) и логическим удалением (B37). |
-| `IAuthorizationContext` | Проверка прав (сотрудник/владелец/админ/интеграция) на момент обращения (B03–B05/B21). |
-| `IExternalPayment` / интеграционный шлюз | Вызов корпоративной системы покупок; изоляция от неё (B23/B27). |
-
-Место сборки приложения — `Motiva.Web` (Composition Root). Фоновое формирование выписок — worker в том же приложении (`IHostedService`), см. §6.
+| `IUnitOfWork` / `ITransactionScope` | атомарность пакета/бюджета/кошелька/движений (B17/B19/B20) |
+| `IEventStore`, `IOperationStore` | бессрочная идемпотентность событий/операций по бизнес-номеру (B16/B24) |
+| `ITimeProvider` (`TimeProvider`) | системный момент принятия и commit (B14), управляемое время в тестах (T05) |
+| `ICompanyCalendar` | периоды/сезон/соревнование в поясе компании, UTC-выход (B10/B13/B33) |
+| `IWalletLedger` | движения и общий баланс ресурса из разных кампаний (B22/B28) |
+| `IRatingStore` + `ILeaderboardCache` | счёт челленджа, фиксация итога, live-кеш (B31–B33, T06) |
+| `IStatementGenerator`, `IStatementStore`, `IObjectStorage(S3)` | асинхронная выписка, сохраняемый снимок, неизменяемые байты (B36–B37, T07) |
+| `IAuthorizationContext` | проверка компании и разрешённой области для каждого входного ID; актуальность прав перед replay (D207) |
 
 ---
 
-## 2. Модель данных
+## 2. Договор JWT (T03)
 
-СУБД: PostgreSQL. Все идентификаторы — `bigint` (суррогатные) или натуральные уникальные ключи из бизнес-кодов. Валидация уникальности кодов — на уровне БД (независимо от приложения).
-
-### 2.1 Таблицы: ключи, ограничения, индексы, история
-
-| Таблица | Ключ | Ограничения / уникальность | Существенные индексы | Удаление / история |
-|---|---|---|---|---|
-| `company` | id | timezone NOT NULL | — | Не удаляется |
-| `employee` | id | `UNIQUE(company_id, master_id)`; is_active; теги | idx(company_id, is_active) | Мягкое: только is_active=false (B05); строки не удаляются |
-| `wallet` | id | `UNIQUE(employee_id)` — ровно 1 кошелёк (B01) | idx(employee_id) | Удаление/смена владельца запрещены (B22e) |
-| `resource` | id | `UNIQUE(company_id, lower(code))` (B06), status ∈ {active, archived} | idx(company_id) | Архив необратим (B07); код не освобождается |
-| `wallet_balance` | (wallet_id, resource_id) | balance INTEGER NOT NULL CHECK (balance ≥ 0) (B22d) | idx(resource_id) | Не удаляется |
-| `campaign` | id | `UNIQUE(company_id, season, code)` (B08); state ∈ {draft, published, archived} (B09); start<end; сезон в поясе компании | idx(company_id, season), idx(state) | Публикованные: удаление запрещено (B09i); черновик — cascade-delete целиком |
-| `stream` | id | `UNIQUE(campaign_id, code)` (B08) | idx(campaign_id) | Архив, не физическое удаление публикованных |
-| `task` | id | `UNIQUE(stream_id, code)` (B08); goal>0; stream_points≥0; теги аудитории (B11) | idx(stream_id) | Архив, не удаление |
-| `milestone` | id | `UNIQUE(stream_id, threshold)`; FK→achievement | idx(stream_id) | Не удаляется |
-| `achievement` | id | `UNIQUE(company_id, code)` (B08) | idx(company_id) | Не удаляется |
-| `challenge` | id | `UNIQUE(stream_id)` — один на стрим; start<end, внутри кампании (B31); state ∈ {open, final} (B33) | idx(stream_id) | Итог неизменяем после final |
-| `purchase_system` | id | name UNIQUE | — | Управляется админом (B23d) |
-| `integration_permission` | id | `UNIQUE(integration, kind, campaign_id, resource_id, purchase_system_id)`; kind ∈ {progress, accrual, spend} (B04) | idx(integration) | История изменений прав (B28d) |
-| `budget` | (campaign_id, resource_id) | remaining INTEGER NOT NULL CHECK (remaining ≥ 0) (B19b) | idx(campaign_id) | Выделения — в истории (`budget_allocation_audit`) |
-| `operation` | id | `UNIQUE(company_id, initiator_kind, source_no)` (B24b); result ∈ {accepted, rejected}; `UNIQUE(original_operation_id) WHERE kind=cancel` — одна успешная отмена (B25d) | idx(employee_id, occurred_at), idx(campaign_id) | Никогда не удаляется (B25a); причина отказа (B28) |
-| `operation_line` | id | FK→operation; `UNIQUE(operation_id, resource_id)`; amount>0 (B06d) | idx(operation_id) | Не удаляется |
-| `wallet_movement` | id | FK→wallet, operation, resource; delta INTEGER; balance_after INTEGER | idx(wallet_id, occurred_at), idx(resource_id) | Не удаляется; объясняет каждый баланс (B28b) |
-| `progress` | (employee_id, task_id, period_start) | value INTEGER NOT NULL CHECK (0 ≤ value ≤ task.goal) (B14d) | idx(employee_id, period_start) | Не удаляется |
-| `event` | id | `UNIQUE(company_id, source_id, source_event_no)` (B16a); credited_increase≥0 | idx(source_id, source_event_no) | Не удаляется; повтор возвращает прежний результат |
-| `completion` | (employee_id, task_id, period_start) | 1 строка = 1 завершение (B15a) | idx(employee_id, period_start) | Не удаляется |
-| `stream_score` | (employee_id, stream_id, season) | points INTEGER | idx(employee_id, season) | Сезон сохраняется (B10e) |
-| `achievement_grant` | (employee_id, achievement_id, season) | ≤1 строка/сезон (B30b) | idx(employee_id, season) | Не удаляется; архив/нехватка бюджета не отзывают |
-| `challenge_score` | (challenge_id, employee_id) | score INTEGER | idx(challenge_id, score DESC) | Итог неизменяем (B33c) |
-| `statement` | id | state ∈ {pending, forming, ready, error, deleted} (B36a); owner_scope; resource_filter; interval; snapshot_fixed_at; data_snapshot_id | idx(owner, state) | Логическое удаление (state=deleted), запись и история остаются (B37b) |
-| `statement_attempt` | id | FK→statement; срез фиксируется при первом успешном начале формирования (B36b) | idx(statement_id) | Повторные попытки используют тот же срез (B36c) |
-
-### 2.2 Аудиты (история изменений, B28d)
-`audit_entries(id, company_id, actor, actor_role, target_type, target_id, action, payload_json, occurred_at)` — фиксирует: изменения прав (B05), настройки кампании до/после публикации, выделения бюджета (B18b), изменение владельца, разрешений интеграций (B04), корректировки админа.
-
-### 2.3 Бюджеты по ресурсам, единый кошелёк, движения
-- **Бюджет** на пару (кампания, ресурс) (`budget.remaining`). Формула (B19a): `remaining = Σ выделений − Σ проведённых начислений + Σ отмен этих начислений`. Выделения только админом (B18); каждое выделение — операция `budget_allocation` + строка аудита.
-- **Единый кошелёк** — `wallet_balance(wallet_id, resource_id).balance`. Одинаковый ресурс из разных кампаний попадает на один баланс (B22b); общий остаток агрегируется через `wallet_movement` по resource_id.
-- **Движения** — `wallet_movement`: для каждого изменения баланса одна строка `(delta, balance_after)` со ссылкой на операцию; `balance_after` позволяет объяснить каждый баланс и проверить `CHECK(balance_after ≥ 0)` (B28b). Отклонённые операции не порождают движения (B28c).
-
-### 2.4 Правила атомарности движений
-Принятие начисления = одна транзакция: `operation` + `operation_line` + `budget.remaining -= amount` (FOR UPDATE) + `wallet_balance += amount` (FOR UPDATE) + `wallet_movement` + `completion`/`stream_score`/`achievement_grant`/`challenge_score` по необходимости (B17). Либо целиком, либо откат.
-
----
-
-## 3. Инварианты: где обеспечиваются, конкурентные/сбойные сценарии, проверка
-
-Обозначения: **DB** — ограничение в БД; **TX** — транзакция приложения + блокировки строк; **APP** — проверка в Application/Domain; **WK** — фоновый worker выписок.
-
-| Инвариант B-ID | Где обеспечивается | Конкурентный/сбойный сценарий | Как проверить |
-|---|---|---|---|
-| Пакетная награда all-or-nothing (B20) | TX: `SELECT ... FOR UPDATE` по всем бюджетам пакета → проверка всех остатков → списание всех позиций атомарно | Два завершения борются за последний остаток: блокировки строк бюджета сериализуют; один проходит, второй — «недостаточно бюджета»; отказ не оставляет изменений | Интегр. тест: параллельные события на один пакет; assert оба бюджета списаны/не списаны вместе; при отказе баланс и бюджеты не изменились |
-| Последнее доступное средство (B19e, B22d) | TX: FOR UPDATE на `budget` и `wallet_balance` + повторная проверка `remaining`/`balance` внутри той же транзакции | Две траты по 7 при балансе 10: блокировка баланса → первая проходит (3), вторая отклонена; balance никогда < 0 | Интегр. тест с двумя параллельными списаниями; assert итог = 3, не −4 |
-| Повтор после commit (B16, B24) | DB: `UNIQUE(company_id, source_id, source_event_no)` и `UNIQUE(company_id, initiator_kind, source_no)` | Повторный запрос с тем же номером: конфликт уникальности → возврат исходного результата без повторных последствий; «тот же номер, другие данные» — отклонение (conflict) | Интегр. тест: повторить событие/операцию; assert прежний результат, счёт/баланс не изменились; изменённые данные → 409 |
-| Отмена: одна успешная, целостная (B25, B26, B27) | DB: `UNIQUE(original_operation_id) WHERE kind=cancel`; TX: проверка баланса, возврат в исходный бюджет (B26) или кошелёк (B27) | Два одновременных запроса отмены: один проходит, второй отклонён/не удваивает возврат; нехватка баланса → отмена целиком отклоняется (E08) | Интегр. тест: две отмены одной операции; assert один возврат; E08-сценарий |
-| Смена прав (B05) | APP/DB: права и активность читаются внутри транзакции принятия; блокировка = is_active=false | Отзыв разрешения/блокировка между попыткой и обработкой: новый запрос проверяет текущие права → отклоняется; уже заработанное не откатывается | Интегр. тест: событие после блокировки отклоняется; история и место в рейтинге сохраняются |
-| Границы соревнования (B31, B33) | APP: счёт = Σ credited_increase событий с accepted_at ∈ [start, end); при final — запись только для чтения | Событие на границе интервала; повтор события на следующий день не попадает в новое соревнование; задержанный ответ источника учитывается, если событие в интервале | Интегр. тест: события до/на/после границы; итог неизменяем после final; повтор не меняет счёт |
-| Снимок выписки (B36) | WK: `snapshot_fixed_at` фиксируется при первом успешном начале формирования (не при заказе); повторные попытки читают `data_snapshot_id` | Новые движения после фиксации не попадают в выписку; повторная попытка после ошибки использует тот же срез | Интегр. тест: создать выписку, добавить движения после фиксации, assert состав не изменился; ошибка → повтор с тем же срезом |
-| Публикация (B09) | APP/TX: валидация всех заданий/ресурсов/вех/челленджей; после публикации неизменяемы ключевые поля (защита через state=published + отказ записи) | Попытка изменить сезон/сроки/награды после публикации → отклоняется; конкурентная публикация — одна транзакция | Интегр. тест: изменить после публикации → ошибка; валидация при публикации |
-| Удаление выписки (B37) | APP: state=deleted; история запроса остаётся; новые разрешения на скачивание не выдаются | Скачивание после удаления → 410/404; уже выданное краткосрочное разрешение действует до конца срока | Интегр. тест: удалить, скачать → отклонено; запись и статус удаления в истории |
-| Целостность прогресса/очков/наград (B17) | TX (единая транзакция принятия события) | Технический сбой после частичного изменения → откат, не остаётся половины результата | Интегр. тест: принудительный сбой транзакции; assert отсутствие частичных изменений |
-
----
-
-## 4. API
-
-REST, префикс версии `/api/v1` для пользовательских/администраторских путей и `/internal/v1` для интеграций. Авторизация через JWT (см. §6). Повторы/идемпотентность — через `Idempotency-Key` (или натуральный номер источника) и уникальные ключи БД (§3).
-
-Единый формат ошибок — RFC 7807 `application/problem+json`:
-`{status, title, detail, code, idempotency-result?, instance}`. Типовые коды: `validation_error`(400), `not_found`(404), `forbidden`(403), `conflict`(409, повтор/изменённый номер/одна отмена), `insufficient_funds`(409), `resource_unavailable`(409), `unprocessable`(422), `gone`(410, удалённая выписка), `internal`(500).
-
-Пагинация: `offset`/`limit` (макс. 100), ответ `{items, total, offset, limit}`; фильтры по периоду и ресурсу (B34d). Версии: путь `/v1`; ломка контракта → `/v2`.
-
-### 4.1 Пользовательские (сотрудник)
-| Ресурс | Метод | Права | Описание | Ключевые схемы/ошибки |
-|---|---|---|---|---|
-| `/api/v1/campaigns` | GET | сотрудник | опубликованные кампании текущего сезона (B11h) | query: `season?`; 200 `CampaignSummary[]` |
-| `/api/v1/campaigns/{id}` | GET | сотрудник (аудитория) | детали кампании и стримы | 200, 403/404 |
-| `/api/v1/tasks/{taskId}/progress` | GET | сотрудник | мой прогресс по заданию за период (B34a) | query: `period`; 200 `ProgressView` |
-| `/api/v1/streams/{id}/score` | GET | сотрудник | мои очки стрима за сезон (B29) | 200 `StreamScoreView` |
-| `/api/v1/achievements` | GET | сотрудник | мои достижения по сезонам (B30/B34a) | query: `season`; 200 `AchievementView[]` |
-| `/api/v1/wallet` | GET | сотрудник | баланс по ресурсам (B22c) | 200 `WalletView` |
-| `/api/v1/wallet/movements` | GET | сотрудник | движения кошелька (B28/B34d) | offset/limit, filters `resource`,`from`,`to` |
-| `/api/v1/wallet/operations` | GET | сотрудник | история операций, включая отказы (B28) | пагинация |
-| `/api/v1/wallet/spend` | POST | сотрудник | трата (B23) | req `{resource, amount, purchaseSystemId}`, header `Idempotency-Key`; 201/409 |
-| `/api/v1/ratings/{challengeId}` | GET | сотрудник (аудитория/участник) | первые N + своё место (B32) | 200 `RatingView` |
-| `/api/v1/statements` | POST | сотрудник | заказать выписку (B35) | req `{from,to,resourceId?}`; 202 `StatementRef` |
-| `/api/v1/statements/{id}` | GET | заказчик | статус/скачивание (B36/B37) | 200/404/410 |
-| `/api/v1/statements/{id}` | DELETE | заказчик | удалить выписку (B37) | 204 |
-
-### 4.2 Владелец кампании
-| Ресурс | Метод | Права | Описание | Ошибки |
-|---|---|---|---|---|
-| `/api/v1/campaigns/{id}` | PUT | владелец (до публикации) | настройка кампании/стримов/заданий/вех/челленджа (B08/B31) | 403/409 (после публикации) |
-| `/api/v1/campaigns/{id}/publish` | POST | владелец | публикация (B09) | 422 (валидация), 409 |
-| `/api/v1/campaigns/{id}/results` | GET | владелец | результаты кампании (B34b) | 200 |
-| `/api/v1/campaigns/{id}/expenses` | GET | владелец | расходы своей кампании (B34b/B35e) | 200 |
-| `/api/v1/campaigns/{id}/accruals` | POST | владелец | ручное начисление, 1 ресурс (B21) | req `{employeeId, resourceId, amount, reason}`, `Idempotency-Key`; 409 |
-| `/api/v1/campaigns/{id}/accruals/{accrualId}/cancel` | POST | владелец | отмена начисления (B26) | 409 (нехватка баланса/повтор) |
-| `/api/v1/campaigns/{id}/tasks/{taskId}/archive` | POST | владелец | архив задания (B09g) | 409 |
-
-### 4.3 Администратор компании
-| Ресурс | Метод | Права | Описание |
-|---|---|---|---|
-| `/api/v1/admin/resources` | GET/POST | админ | список/создание ресурсов (B06) |
-| `/api/v1/admin/resources/{id}` | PUT/POST archive | админ | редактирование названия / архив (B06/B07) |
-| `/api/v1/admin/employees` | GET/POST | админ | управление профилями (B01) |
-| `/api/v1/admin/employees/{id}/status` | PUT | админ | активация/блокировка (B05) |
-| `/api/v1/admin/campaigns` | GET/POST | админ | управление кампаниями и владельцами (B03/B08) |
-| `/api/v1/admin/campaigns/{id}/budget` | POST | админ | выделение/увеличение бюджета по ресурсу (B18) |
-| `/api/v1/admin/purchase-systems` | GET/POST | админ | системы покупок и принимаемые ресурсы (B23d) |
-| `/api/v1/admin/integrations/{id}/permissions` | PUT | админ | разрешения интеграций (B04) |
-| `/api/v1/admin/accruals/{id}/cancel` | POST | админ | отмена начисления любой кампании (B26) |
-| `/api/v1/admin/spends/{id}/refund` | POST | админ | возврат по трате (B27) |
-| `/api/v1/admin/statements` | POST | админ | выписка за сотрудника/компанию (B35) |
-| `/api/v1/admin/audit` | GET | админ | история изменений прав/настроек/бюджета (B28d) |
-
-### 4.4 Интеграции (internal)
-| Ресурс | Метод | Права | Описание | Ошибки/повторы |
-|---|---|---|---|---|
-| `/internal/v1/events` | POST | интеграция (разрешение progress) | передать прогресс (B14) | `{employeeId, taskId, increase, sourceEventNo}`; 201/409; unique(event) |
-| `/internal/v1/accruals` | POST | интеграция (разрешение accrual) | начисление из бюджета (B21b) | `Idempotency-Key` |
-| `/internal/v1/spends` | POST | интеграция (разрешение spend) | списание для системы покупок (B23) | `{employeeId, resourceId, amount, purchaseSystemId}` |
-| `/internal/v1/spends/{id}/refund` | POST | та же система покупок + разрешение | возврат (B27) | 409 (повтор) |
-| `/internal/v1/operations` | GET | интеграция | только своя история операций (B04c) | пагинация |
-
-### 4.5 Схемы данных (ключевые DTO)
-`CampaignSummary{id, code, name, season, start, end, streams[]}`; `WalletView{resourceId, code, balance}`; `Movement{id, operationId, resourceId, delta, balanceAfter, occurredAt, kind, sourceNo, campaignId?, originalId?}`; `RatingView{top:[{masterId, score, place}], own:{masterId, score, place}, limit}`; `StatementRef{id, state, url?}`; `OperationResult{result: accepted|rejected, reason?}`.
-
-Полные схемы и примеры ответов — в `openapi.yaml`.
-
----
-
-## 5. Решения по сквозным механизмам
-
-### 5.1 Аутентификация/авторизация (допущение, см. §9)
-JWT: claims `master_id`, `company_id`, `role` (employee/owner/admin/integration) и scoped id (`campaign_id`, `purchase_system_id`). Валидация подписи + срока действия на шлюзе/Web; авторизация на действие — в Application через `IAuthorizationContext`, читающий актуальные права из БД (не из токена) для ролей, меняющихся во времени (владелец/разрешения). Сотрудник/админ — из токена (`company_id` — tenant-граница, B02). `master_id` привязан к компании.
-
-### 5.2 Кеш
-Кешируется только статичное: опубликованные кампании и их аудитория-теги, справочники ресурсов, коды достижений — с инвалидацией при публикации/архиве. **Не кешируются**: балансы, бюджеты, права/активность, разрешения интеграций, счёт рейтинга — они читаются из БД в транзакции принятия для гарантии свежести инвариантов (B05/B19/B22). Кеш не используется для принятия решений по деньгам/правам.
-
-### 5.3 Фоновые операции
-Формирование выписки — асинхронно: `POST /statements` создаёт запись `state=pending`; worker (`IHostedService`) берёт задачу, фиксирует срез данных при первом успешном начале формирования (`statement_attempt` + `snapshot_fixed_at`), формирует файл, переводит в `ready/error`. Повторные попытки из `error` используют тот же срез (B36c). Отказ worker не блокирует учёт прогресса/начислений/трат (B37d) — отдельный конвейер.
-
-### 5.4 Отказы и повторные попытки
-- Идемпотентность: уникальные ключи БД + `Idempotency-Key`. Повтор после commit возвращает исходный результат (200/409 с `idempotency-result`).
-- Сбои транзакций (сеть/БД): 5xx с retry; повтор безопасен из-за идемпотентности.
-- Бизнес-отказы: 409 с кодом (`insufficient_funds`, `resource_unavailable`, `conflict`) — не технические ошибки (B17c).
-- Отмены: недопустимая повторная отмена → 409 (уже есть успешная).
-
-### 5.5 Нагрузка
-Монолит + PostgreSQL; узкие индексы на hot-путь (идентификация события/операции по уникальному ключу, прогресс, балансы). Пакетные начисления при большом объёме — записи построчно с FOR UPDATE; изоляция READ COMMITTED достаточно для описанных инвариантов (блокировки строк). Пагинация обязательна для всех списков (B34d). Нет распределённых транзакций — интеграции вызываются через idempotent порты (события/операции), т.е. согласованность «в конечном счёте» для внешних систем, атомарность внутри БД.
-
-### 5.6 Слои тестирования
-- **Unit** (Domain): цель, кап прогресса, all-or-nothing, периоды, очки/рейтинг, права — без БД.
-- **Integration** (БД): инварианты §3 (конкуренция, повторы, отмены, границы соревнования, выписки) — реальный PostgreSQL.
-- **Contract**: OpenAPI-контракт согласуется с реализацией (схемы/ошибки).
-- **E2E**: пользовательские сценарии (трата, выписка, рейтинг) через API.
-
----
-
-## 6. Покрытие требований (без повторения текста)
-
-| Группа | Покрыто в |
+### 2.1 Формат
+| Поле | Требование |
 |---|---|
-| B01–B02 (компания/сотрудник/границы) | §2 `company`, `employee`, `wallet`, tenant-граница §5.1 |
-| B03–B05 (права, интеграции, актуальность) | §4 права на методах, §5.1, §3 «смена прав», аудит §2.2 |
-| B06–B07 (ресурсы, архив) | §2 `resource`, §4.3 |
-| B08–B11 (кампания/стрим/сезон/аудитория) | §2 `campaign/stream/task`, теги аудитории, §4.1 `campaigns` |
-| B12–B17 (задание/периоды/событие/завершение/повтор/целостность) | §2 `task/progress/event/completion`, §3 «повтор», «целостность», `ICompanyCalendar` |
-| B18–B21 (бюджет/остаток/награда/ручное начисление) | §2.3 бюджеты, §3 «пакетная награда», §4.2/4.3 accruals |
-| B22–B28 (кошелёк/траты/повторы/история/отмены) | §2.1 `wallet_balance/wallet_movement/operation`, §2.3, §3 «отмена», §4.1 wallet |
-| B29–B33 (вехи/достижения/челлендж/рейтинг/итог) | §2 `milestone/achievement/challenge/stream_score/achievement_grant/challenge_score`, §3 «границы соревнования», §4.1 ratings |
-| B34–B37 (результаты/выписка/состояния/доступ) | §4 выписки, §3 «снимок» и «удаление», §5.3 |
-| E01–E12 (примеры) | §3: E01/S1, E02, E03, E04, E05, E06, E07, E08, E09, E10, E11, E12 — как проверяемые сценарии §3 |
-| T1–T7 (технические) | T1: §4.1 ratings `limit` (значение N открыто, RA1); T2: формат выписки (допущение CSV, §9) и интервал (открыто, RA2); T3: `ITimeProvider`/момент принятия §1.4; T4: номер источника — строковый (§4); T5: причина отказа — `code`+`detail` (§4); T6: пагинация §4; T7: `statement_attempt` §3/§2.1 |
+| `iss` | `motiva-benchmark` |
+| `aud` | `motiva-api` |
+| Алгоритм | только HS256 в локальном профиле |
+| `sub` | постоянная идентичность инициатора |
+| `companyId` | UUID компании |
+| `actorType` | `user` либо `service` |
+| `masterId` | положительный Int32, обязателен для `user` |
+| `role` | `Employee`; дополнительный `Admin` для администратора |
+| `exp`, `nbf` | проверяются; clock skew ≤ 30 с |
+
+- Владелец определяется записью кампании, а не ролью `Owner`. `service` не имеет кошелька и не получает пользовательские полномочия.
+- Обязательные identity-claims проверяются на отсутствие, дублирование и противоречия; представление нескольких ролей настраивается явно. Старые `master_id/company_id` и роли `owner/integration` не используются.
+- Ключ: `Auth__Issuer`, `Auth__Audience`, `Auth__SigningKeyBase64`; подпись проверяется по **Base64-декодированным байтам**. Секреты/JWT/signed URLs не коммитятся и не логируются.
+- Токены выпускаются вне Motiva (`.NET SDK`, `dotnet user-jwts`). Bootstrap: только начальные компании и активный Admin — через доверенные use cases (T03); остальное — через административный API.
+- Корпоративная смена роли Admin требует нового токена; мгновенный отзыв JWT, SSO и refresh tokens вне задачи. Актуальная блокировка бизнес-профиля и grants обязательна и реализуется через `IAuthorizationContext` (D207).
 
 ---
 
-## 7. Противоречия во входах
+## 3. Модель данных (D210)
 
-| № | Входы | Противоречие | Воздействие |
+СУБД PostgreSQL 17. Натуральные уникальные ключи из бизнес-кодов + суррогатные `bigint`. Диапазоны (T05): суммы/цели/delta/очки ≤ 10⁹ (INTEGER); балансы и бюджеты ≤ 10¹⁵ (BIGINT/NUMERIC(38,0)); `masterId` — положительный Int32; `companyId` — UUID. Проверка переполнения — 400 без частичного эффекта.
+
+### 3.1 Таблицы
+
+| Таблица | Ключ | Ограничения / уникальность | Типы | Индексы | История/удаление |
+|---|---|---|---|---|---|
+| `company` | id | — | — | — | не удаляется |
+| `employee` | id | `UNIQUE(company_id, master_id)`; is_active; master_id Int32>0 | tags jsonb | idx(company_id, is_active) | мягкое: is_active=false; строки не удаляются |
+| `wallet` | id | `UNIQUE(employee_id)` — 1 кошелёк (B01) | — | idx(employee_id) | удаление/смена владельца запрещены (B22e) |
+| `resource` | id | `UNIQUE(company_id, lower(code))` (B06); status ∈ {active,archived}; code 1–40 ASCII | — | idx(company_id) | архив необратим; код не освобождается (B07) |
+| `wallet_balance` | (wallet_id, resource_id) | balance BIGINT `CHECK(balance BETWEEN 0 AND 1e15)` (B22d) | — | idx(resource_id) | не удаляется; создаётся первым движением (upsert) |
+| `campaign` | id | `UNIQUE(company_id, season, code)`; state ∈ {draft,published,archived}; start<end | audience jsonb; resources jsonb | idx(company_id, season), idx(state) | опубликованные не удаляются; черновик — DELETE кампании и её настроек без экономики |
+| `stream` | id | `UNIQUE(campaign_id, code)` | audience jsonb | idx(campaign_id) | архив, не удаление публикованных |
+| `task` | id | `UNIQUE(stream_id, code)`; goal INTEGER 1..1e9; stream_points INTEGER 0..1e9; periodicity enum | audience jsonb; rewards jsonb | idx(stream_id) | архив |
+| `milestone` | id | `UNIQUE(stream_id, threshold)`; threshold>0; FK→achievement | — | idx(stream_id) | не удаляется |
+| `achievement` | id | `UNIQUE(company_id, code)` | — | idx(company_id) | не удаляется |
+| `challenge` | id | start<end, внутри кампании; **без** ограничения «один на стрим» (D210); state ∈ {open,final} | — | idx(stream_id) | итог неизменяем после final (B33) |
+| `purchase_system` | id | name UNIQUE | — | — | управляется админом |
+| `purchase_system_resource` | (purchase_system_id, resource_id) | FK→resource | — | — | принимаемые ресурсы (B23d) |
+| `integration` | id | identity service | — | — | управляется админом |
+| `integration_grant` | id | `UNIQUE(integration_id, kind, campaign_id, resource_id, purchase_system_id)`; kind ∈ {progress,accrual,spend} (B04) | — | idx(integration_id) | аудит отзывов (B05) |
+| `budget` | (campaign_id, resource_id) | remaining BIGINT `CHECK(0..1e15)` (B19b) | — | idx(campaign_id) | выделения — в `budget_allocation` |
+| `operation` | id | `UNIQUE(company_id, initiator_key, kind, source_no)` (D201); result ∈ {posted,declined}; kind ∈ {budget_allocation,manual_accrual,task_reward,spend,accrual_cancellation,spend_refund} | — | idx(employee_id, occurred_at), idx(campaign_id) | не удаляется; причина отказа (B28) |
+| `operation_line` | id | FK→operation; `UNIQUE(operation_id, resource_id)`; amount 1..1e9 | — | idx(operation_id) | полный состав пакета (D202) |
+| `wallet_movement` | id | FK→wallet,operation,resource; delta, balance_after BIGINT | — | idx(wallet_id, occurred_at), idx(resource_id) | не удаляется; объясняет баланс (B28) |
+| `progress` | (employee_id, task_id, period_start) | value INTEGER `CHECK(0..1e9)`; **доменное правило `value ≤ task.goal`** — защита через приложение + триггер, не наивный CHECK (D210) | — | idx(employee_id, period_start) | не удаляется |
+| `event` | id | `UNIQUE(company_id, source_id, source_event_no)` (B16a); credited_increase 0..1e9 | — | idx(source_id, source_event_no) | не удаляется; повтор возвращает прежний результат |
+| `completion` | (employee_id, task_id, period_start) | 1 строка = 1 завершение (B15a) | — | idx(employee_id, period_start) | не удаляется |
+| `stream_score` | (employee_id, stream_id, season) | points INTEGER 0..1e9 | — | idx(employee_id, season) | сезон сохраняется (B10e) |
+| `achievement_grant` | (employee_id, achievement_id, season) | ≤1 строка/сезон (B30b) | — | idx(employee_id, season) | не удаляется; архив/нехватка бюджета не отзывают |
+| `challenge_score` | (challenge_id, employee_id) | score INTEGER; finalized_at | — | idx(challenge_id, score DESC) | после final неизменяем (B33) |
+| `statement` | id | state ∈ {pending,forming,ready,error,deleted}; owner scope; resource filter; interval [from,to) | — | idx(owner, state) | логическое удаление; история остаётся (B37) |
+| `statement_data` | id | FK→statement; **snapshot_id**; сохранённый состав (список movement id) | — | idx(statement_id) | фиксируется при первом успешном начале формирования (B36) |
+| `statement_download` | id | FK→statement; url; issued_at; expires_at; revoked_at | — | idx(statement_id) | отдельный ресурс ссылки (T04/T05) |
+| `audit_entry` | id | actor, actor_key, target, action, payload, occurred_at | — | idx(target, occurred_at) | согласованный аудит прав/настроек/бюджета (B28d) |
+
+Примечания D210:
+- `wallet_balance.balance` и `budget.remaining` — BIGINT, покрывают три начисления по 10⁹ (баланс 3·10⁹) и лимит 10¹⁵.
+- `progress.value ≤ task.goal` — доменное правило (B14d), в БД реализуется триггером, а не обычным CHECK (межтабличная ссылка).
+- Удаление черновика кампании не удаляет аудит и экономическую историю (экономики у черновика нет, но аудит настроек сохраняется в `audit_entry`).
+- `challenge` не имеет ограничения «один на стрим» (B31 не задаёт его).
+
+### 3.2 Бюджеты по ресурсам, единый кошелёк, движения
+- **Бюджет** `budget.remaining` на пару (кампания, ресурс): `remaining = Σ выделений − Σ проведённых начислений + Σ успешных отмен этих начислений` (B19a). Выделение только админом (B18), каждая — операция `budget_allocation` + `audit_entry`.
+- **Единый кошелёк** `wallet_balance(wallet_id, resource_id)`: одинаковый ресурс из разных кампаний — один баланс (B22b).
+- **Движения** `wallet_movement(delta, balance_after)` на каждое изменение, со ссылкой на операцию; отклонённые операции не порождают движения (B28c); `balance_after` объясняет каждый баланс.
+
+---
+
+## 4. Механизмы инвариантов и протоколы (D203)
+
+Обозначения: **DB** — ограничение/триггер БД; **TX** — транзакция; **APP** — проверка Application/Domain; **WK** — worker. Для всех экономических операций обязателен законченный протокол (см. ниже), а не только «транзакция + FOR UPDATE».
+
+### 4.1 Общие принципы
+Различаются моменты: **приход HTTP** (вход), **системный момент принятия** (назначается `TimeProvider`, `accepted_at`), **commit**, **отправка ответа**. Экономический эффект фиксируется в одном согласованном наборе записей внутри одной транзакции (B17); перенос эффекта в несогласованный последующий процесс исключён. Lock/isolation level не навязываются, требуется законченный механизм по каждому пути (§4.2–4.5). Отсутствующие строки обрабатываются upsert с `ON CONFLICT`.
+
+### 4.2 Принятие события (прогресс/завершение/награда)
+Транзакция приёма события `E` (сотрудник, задание, increase>0, source_event_no):
+1. Проверка: интеграция имеет grant progress по кампании задания; активность сотрудника; аудитория кампании и задания (актуальный источник, не кеш); сроки; кампания published; задание не архив.
+2. Идемпотентность: вставка `event` по `UNIQUE(company_id, source_id, source_event_no)`. При конфликте — повтор: вернуть сохранённый результат без переоценки (п. D203; отзыв grant/владения и активность проверяются перед этим).
+3. `FOR UPDATE` строки `progress(employee, task, period)` (upsert при отсутствии).
+4. `credited = min(goal − old, increase)`; обновить `progress`; сохранить `event.sent_increase`, `event.credited_increase`.
+5. Если `old < goal ≤ old+credited` и нет `completion`: вставить `completion` (уникальность не даёт дубля при двух событиях, конкурирующих за цель); добавить очки в `stream_score` (read-modify-write с FOR UPDATE); проверить вехи стрима — для каждой, чей порог пройден, выдать `achievement_grant` (upsert, `UNIQUE(employee, achievement, season)`); принять решение о награде п.4.3.
+6. Commit. Отправка ответа после commit.
+
+**Закрытие путей (D203):**
+- Два события одного задания за цель: `progress` FOR UPDATE сериализует; `completion` unique гарантирует одно завершение; второе получает credited=0.
+- Два завершения разных заданий одного стрима: `stream_score` read-modify-write с FOR UPDATE не теряет очки.
+- Пересечение нескольких вех: все положенные `achievement_grant` в одной транзакции, без пропуска; `UNIQUE` предотвращает повторную выдачу.
+- Одно достижение через разные стримы/кампании в сезоне: `achievement_grant` keyed (employee, achievement, season) — выдаётся один раз (B30).
+- Создание первого баланса ресурса: upsert `wallet_balance` (ON CONFLICT), первый `wallet_movement` создаёт строку.
+
+### 4.3 Пакетная награда (B20) и конкуренция за последний остаток
+В той же транзакции приёма события: `FOR UPDATE` по **всем** `budget` позициям пакета; проверить каждый `remaining ≥ amount`; если все — списать все позиции (операция `task_reward` + `operation_line` + `wallet_balance` += + `wallet_movement`), результат `posted`; иначе — `declined` (с причиной «недостаточно бюджета»/«ресурс недоступен»), без движений. Решение окончательное (B20c). Архивный ресурс → весь пакет declined, выполнение учитывается (B07e). Равенство остатка требуемой сумме достаточно (B19).
+
+### 4.4 Списание, возврат, отмена начисления
+- **Списание** (`spend`): проверка системы покупок, ресурса в принимаемых, активности получателя; `FOR UPDATE wallet_balance`; `remaining ≥ amount` → списать (posted) иначе declined (B23e); трата не возвращает в кампанию (B23f).
+- **Возврат списания** (`spend_refund`, B27): admin либо та же система покупок с актуальным grant spend на этот ресурс и систему; полная сумма в исходный кошелёк, без бюджета кампании; только одна успешная отмена (см. 4.6).
+- **Отмена начисления** (`accrual_cancellation`, B26): admin, либо владелец исходной кампании (активный получатель; для заблокированного — только admin, RA4); полный пакет (`operation_line`); `FOR UPDATE` всех затронутых `wallet_balance`; нехватка хотя бы одного баланса → declined целиком; успех — возврат всех позиций в исходные бюджеты; прогресс/очки/достижения/рейтинг не отзываются (B26d).
+- **Выделение бюджета** (`budget_allocation`, B18): admin; только увеличение/первичное выделение; записывается как операция + `audit_entry`.
+
+### 4.5 Публикация, редактирование, финализация челленджа
+- **Публикация** (Draft→Published): атомарный переход; валидация заданий/ресурсов/вех/челленджей; после публикации запрещено менять сезон/сроки/состав/цели/периодичность/награды/очки/правила рейтинга — настройки, изменяемые после публикации (название, описание, аудитория, владелец), реализуются отдельными полями с проверкой в Application (B09e–f).
+- **Аудит доступа**: аудитория кампании изменяема после публикации (название/описание/аудитория/владелец), но проверка права на **новый** прогресс читает актуальный источник (не кеш каталога), поэтому изменение аудитории сразу влияет на новые обращения (B05/B09f).
+- **Финализация челленджа** (B33): событие и финализация сериализуются через `FOR UPDATE` на строке `challenge`. Принятие события с потенциальным попаданием в `[start,end)` захватывает замок `challenge`, фиксирует системный `accepted_at`, определяет принадлежность к интервалу и коммитит. Финализатор захватывает тот же замок, переводит `challenge` в `final`, и в своём снимке читает все события с `accepted_at < end` — гарантированно видит все принятые события интервала (те, что обрабатывались до end, закоммичены до захвата замка финализацией; события после финализации получают `accepted_at ≥ end` и вне интервала). После `final` итог неизменяем; повтор события и отмена награды не меняют результат (B33c–e). Очки/награды не влияют на счёт (B31c).
+- **Публикация рейтинга** (T06): после `final` итог публикуется в Valkey не позднее 5 с.
+
+### 4.6 Таблица инвариантов → механизм → конкурентный/сбойный сценарий → проверка
+
+| Инвариант | Механизм | Конкурентный/сбойный сценарий | Проверка |
 |---|---|---|---|
-| C1 | Заявленный «договор JWT» отсутствует в окружении | Неизвестен контракт токена | Авторизация спроектирована по допущению §5.1 (claims master_id/company_id/role) |
-| C2 | Заявленные «инженерные условия» отсутствуют | Неизвестны минимальные проекты и допустимые технологии | Состав §1.1 — допущение на основе `.editorconfig` (C#/.NET) |
-| C3 | `openapi.yaml` не существовал | Проект API выполнен нами, без исходного контракта | Контракт задаётся `openapi.yaml` как результат этапа |
-
-Противоречия C1–C3 не исправлялись тайно; они вынесены явно и требуют решения организатора (§9).
+| Пакетная награда all-or-nothing (B20) | TX: FOR UPDATE всех бюджетов пакета + проверка → атомарное списание | два завершения за последний остаток; блокировки сериализуют; один posted, второй declined без изменений | integration: параллельные события на пакет; assert оба позиции списаны/нет; при отказе балансы/бюджеты не изменились |
+| Последний остаток / баланс ≥ 0 (B19/B22) | FOR UPDATE `budget`/`wallet_balance` + перепроверка | две траты по 7 при балансе 10 → 3, не −4 (E05) | integration: две параллельные траты; assert итог |
+| Повтор после commit (B16/B24) | DB unique-ключи + возврат сохранённого результата | повторный запрос; изменённые данные → 409 | integration: повтор события/операции; assert прежний результат; 409 при изменении |
+| Одна успешная отмена (B25/B26/B27) | все попытки сохраняются; успех ≤1 через partial unique index | D202: отказ (потрачен B) → пополнение → успех новым номером; повтор отклонённого — прежний отказ; конкурирующие успехи — один эффект | integration: E08 + сценарий пополнения; assert один возврат |
+| Смена прав перед replay (B05) | `IAuthorizationContext` внутри TX приёма; активность/grants актуальны | отзыв grant/блокировка → replay не обходит, запрещённый результат не выдаётся | integration: replay после отзыва; assert отклонён |
+| Границы соревнования (B31/B33) | FOR UPDATE `challenge` + согласованный снимок; событие с accepted_at<end входит | событие до end с задержанным ответом; повтор на следующий день не в новый челлендж | integration: события до/на/после границы; final неизменяем; повтор не меняет |
+| Снимок выписки (B36) | MVCC-снимок + сохранённый `statement_data.snapshot_id` (D208) | поздний commit с ранним timestamp не входит; повторная попытка — тот же состав | integration: добавить движение после фиксации снимка; assert состав не изменился |
+| Публикация/редактирование (B09) | APP/DB: валидация при переходе; неизменяемые поля защищены | изменение сезона/наград после публикации → 409 | integration: изменить после публикации → 409 |
+| Целостность (B17) | одна TX на приём/операцию | технический сбой → откат, нет половины | integration: принудительный откат; assert отсутствие частичных изменений |
 
 ---
 
-## 8. Открытые вопросы (остались от stage-1 + новые)
+## 5. Повторы, одна успешная отмена, числа (T05/D201/D202)
 
-**Бизнес (из stage-1):**
-- RA1 — значение N «первых участников» рейтинга (B32) — параметр `limit`, значение задаёт заказчик.
-- RA2 — интервал выписки: произвольный или выровненный по периодам/кампаниям (B35).
-- RA4 — доступность отмены награды заблокированному получателю для владельца vs только админа (B26).
+### 5.1 Два механизма повторов
+1. **Бессрочный (B16/B24):** бизнес-номер события/операции → неизменяемый результат, включая экономический отказ. Область события: `(company, source, source_event_no)` (B16). Область операции: **`(company, конкретный инициатор, вид бизнес-операции, source_no)`** (D201) — инициатор связывается с проверенной идентичностью (`employee.id` или `integration.id`), тип/роль инициатора (user/service/admin) не входят в ключ; смена роли или переход между маршрутами не создаёт вторую копию той же бизнес-операции.
+2. **Транспортный (остальные создающие POST):** `Idempotency-Key` ≥ 24 ч; scope — (компания, проверенный инициатор, операция/целевой ресурс, ключ). Семантика не зависит от порядка полей и позиций; изменение существенных данных под тем же ключом — 409.
 
-**Технические/входовые (этап 2):**
-- JWT-договор: алгоритм подписи (HS256/RS256), issuer/audience, claims-набор, способ передачи, источник master_id/company_id.
-- Инженерные условия: точный минимальный состав проектов, целевая СУБД/фреймворк, ограничения деплоя.
-- Формат файла выписки (допущение — CSV) и его схема.
-- N рейтинга и порции истории (размеры).
+**Порядок проверок:** токен/актуальная авторизация → сохранённый результат и совпадение запроса → только для нового действия — бизнес-предусловия. Повтор старого результата не переоценивает изменившийся бюджет/период/состояние; но отзыв grant/владения и предусмотренная проверка активности **не обходятся** (D201/T05).
 
-Остановка: планирование и реализация не начинались.
+- Повтор возвращает прежние ID, HTTP-статус и представление; тело при повторе не меняется флагом `idempotent=true`, если первоначально было `false`. GET показывает актуальное состояние.
+- Ошибки доступа, валидации и временной недоступности не сохраняются как успешная обработка. Параллельный повтор может ограниченно ждать либо получить 503/Retry-After; последующий повтор восстанавливает результат. Неопределённость после commit не разрешает повтор эффекта без проверки исхода.
+
+### 5.2 Одна успешная отмена (D202)
+Механизм: **все** попытки отмены сохраняются как операции (`accrual_cancellation`/`spend_refund`) с результатом `posted`/`declined`. Успешно проведённых отмен на один оригинал — **не более одной**, что обеспечивается **частичным уникальным индексом**:
+`UNIQUE(original_operation_id) WHERE result = 'posted' AND kind IN ('accrual_cancellation','spend_refund')`.
+Отклонённые попытки не нарушают индекс и не закрывают новую попытку с новым номером (B25e). Разбор:
+1. отказ отмены пакета из-за потраченного B → declined, движений нет;
+2. законное последующее пополнение B;
+3. успешная отмена с новым номером → posted (partial index захватывает);
+4. повтор старого отклонённого номера → прежний declined;
+5. конкурирующие успешные отмены → partial index пропускает только одну; вторая — declined (одноэффектный результат).
+
+Причина, оригинал, номер и полный состав (`operation_line`) отменяемой операции представлены в API и модели (D202).
+
+### 5.3 Числа и время (T05)
+- `masterId` положительный Int32; `companyId` UUID. Внутренние суррогатные `bigint` с явным отображением на внешние ключи.
+- Коды ASCII `[A-Za-z0-9_-]{1,40}` (уникальность без учёта регистра в родителе); названия 1–200; описания ≤2000; теги `[a-z0-9-]{1,32}`; внешние номера 1–100 ASCII (регистрозависимые).
+- Цели/delta/отдельные суммы/очки ≤10⁹ (знак по бизнес-правилу); балансы/бюджеты ≤10¹⁵; точная целочисленная арифметика с проверкой переполнения; нарушение диапазона — 400 без частичного эффекта.
+- Внешние даты с UTC offset, выход UTC; тестовое время через `TimeProvider`, без production HTTP-переключателя часов.
+
+### 5.4 RA4 в механизмах
+Отмену/возврат **заблокированного** получателя выполняет только Admin (RA4). Для активного — владелец (своя кампания) / admin / та же система покупок (B27). Проверка активности и полномочий — в Application-входе (D207).
+
+---
+
+## 6. Конкуренция, кеш, экспорт (T06–T07/D208/D209)
+
+### 6.1 Кеш (T06/D209)
+- **Каталог (неперсональный):** кампании/стримы/задания, теги аудитории, ресурсы. Отставание ≤ 30 с, свежесть отражает `asOf`. Аудит каталога изменяем (аудитория/владелец), поэтому **проверка доступа к новому прогрессу выполняется по актуальному источнику (БД)**, кеш каталога — только для отображения. Повреждённое значение → miss; delayed fill не продлевает полный TTL старого снимка; отказ Valkey → ограниченное ожидание и PostgreSQL fallback.
+- **Live leaderboard (T06):** Valkey, отставание ≤ 5 с, `asOf`. Финальный результат — **авторитетные неизменяемые данные** (БД `challenge_score` finalized), не текущее содержимое кеша.
+- Кеш не используется для принятия решений по деньгам/правам/активности (B05/B19/B22).
+
+### 6.2 Снимок выписки (D208/B36)
+Состав фиксируется **при первом успешном начале формирования**:
+1. `POST /statements` → `statement(state=pending)`; состав не фиксируется.
+2. Worker: транзакция с **MVCC-снимком** (repeatable read) на момент начала формирования; выборка движений по фильтрам выполняется **в этом снимке**; список отобранных `movement.id` сохраняется в `statement_data(snapshot_id, ids)` и `statement` переходит `pending→forming` атомарно (единственный переход, фиксирующий снимок).
+3. Поздний commit с ранним `created_at` не попадает: состав определяется выбранным согласованным снимком (MVCC-видимость), **не** только timestamp-фильтром.
+4. Второй worker/повторная попытка после рестарта читает `snapshot_id` — выборка не переснимается, состав переиспользуется (B36c).
+5. Crash **до** фиксации снимка: `statement` остаётся `pending`/`error`; успешного начала не было — повтор формирует заново (это не нарушает «первое успешное начало»). Crash **после** фиксации: повтор с тем же `snapshot_id`.
+6. Формирование потоковое из сохранённого состава; 100 000 строк ≤ 120 с на исправном стенде (T07).
+
+### 6.3 Жизненный цикл S3 и удаление (D208)
+- S3-загрузка выполняется **вне транзакции** основной экономики; объект имеет детерминированный ключ = `snapshot_id`, что даёт идемпотентность повторной загрузки.
+- Crash после upload до Ready: при восстановлении объект либо уже существует (по ключу) и переиспользуется, либо перезагружается из `statement_data`; `Ready` выставляется только после проверки целостности загруженных байт (неизменяемые байты, B36e).
+- **Удаление во время формирования/после upload до Ready:** `statement.state=deleted` выигрывает; worker перед публикацией проверяет актуальное состояние и не публикует; удалённый экспорт **не воскресает** (B37b). При удалении отзываются `statement_download`.
+- **Уборка:** cleanup-worker удаляет неопубликованные/незавершённые S3-объекты не позднее 10 минут после восстановления зависимостей; объекты без действующего `Ready` statement чистятся.
+- **Download link:** отдельный ресурс `statement_download` (T04/T05), срок ≤ 60 с; после удаления экспорта ссылка не возвращается даже сохранённая (после проверки доступа — 409); истёкшая, но не отозванная ссылка при replay — прежняя.
+
+### 6.4 Фоновые процессы, надёжность, наблюдаемость (T07)
+- Два API и два worker; корректность не зависит от process-local lock или Valkey-lock (сериализация — в PostgreSQL, §4.5).
+- Конечные timeout/retry budgets (проектные параметры, не бизнес-правила): HTTP/DB 5 c/3 попытки; Valkey 200 мс/2; S3 10 c/3; безопасное поведение при неопределённом commit — проверка исхода перед повтором эффекта.
+- Structured logs, trace/correlation ID, метрики запросов/повторов/очереди. Недоступность PostgreSQL → ограниченный 503, не ложный успех. Readiness отражает возможность основной работы; liveness не падает только из-за внешней зависимости. Отказ S3 не блокирует основную экономику.
+
+---
+
+## 7. REST и OpenAPI (T04/D204/D205/D206)
+
+### 7.1 Принципы
+- **Без action-путей** (`/publish`, `/archive`, `/cancel`, `/spend`, `/refund`, `/execute`). Изменения настройки — PATCH ресурса; отмены/возвраты — отдельные ресурсы (`accrual-cancellations`, `spend-refunds`); состояния кампании/ресурса/стрима/задания — поле `status` при PATCH.
+- Статусы: создание — **201 + Location**; чтение — 200; удаление — 204.
+- **Экономический отказ корректной операции — сохранённый `Declined`, 201, та же схема результата, что `Posted`** (наблюдаемо через один контракт `OperationOutcome{status: posted|declined}`), не ProblemDetails (D206).
+- Ошибки: 401 (неверный JWT), 403 (нет полномочий), 404 (чужой/недоступный персональный объект), 400 (неверные поля), 409 (конфликт номера/состояния). ProblemDetails с постоянным `code` и `traceId`, без `idempotency-result`.
+- PUT/PATCH/DELETE существующих изменяемых настроек — strong ETag/If-Match: отсутствие 428, устаревший 412. Экономические операции и удаление выписки If-Match не требуют (другая защита).
+- Списки: `items + nextCursor`, default 50, max 100; история append-only не пропускает/не дублирует существовавшие записи при новых вставках.
+- Live leaderboard — top N и отдельное `own` место. GET не инициирует экономику/финализацию/выдачу ссылки. Export создаётся 201; статус читается стабильным DTO; download link — отдельный ресурс.
+- Для каждой (method, route, status, media type) — одна определённая схема; коллекции типизированы (без `Page.items: object`); обязательные/nullable поля, ограничения и примеры описаны.
+
+### 7.2 Семейства ресурсов (покрытие D204/D205)
+| Семейство | Ресурсы |
+|---|---|
+| Сотрудники | `employees` GET/POST, `employees/{id}` GET/PATCH (теги, владелец, status) |
+| Ресурсы | `resources` GET/POST, `resources/{id}` GET/PATCH (name, status:archived) |
+| Кампании | `campaigns` GET/POST, `campaigns/{id}` GET/PATCH (настройки + status draft/published/archived), DELETE (черновик) |
+| Стримы/задания | `campaigns/{id}/streams` GET/POST, `streams/{id}` PATCH (status), `streams/{id}/tasks` GET/POST, `tasks/{id}` PATCH (status) |
+| Вехи | `streams/{id}/milestones` GET/POST, `milestones/{id}` GET/PATCH |
+| Челленджи | `challenges` GET/POST (в составе кампании), `challenges/{id}` GET, leaderboard |
+| Достижения | `achievements` GET/POST (определения), `achievements/{id}` GET/PATCH, выдачи `achievement-grants` GET |
+| Бюджеты/выделения | `campaigns/{id}/budgets` GET, `campaigns/{id}/budget-allocations` POST (admin) |
+| Интеграции/grants | `integrations` GET, `integrations/{id}/grants` GET/PUT (admin) |
+| Системы покупок | `purchase-systems` GET/POST, `purchase-systems/{id}` GET/PATCH, принимаемые ресурсы |
+| События | `events` POST (интеграция) — передача прогресса |
+| Кошелёк | `wallet` GET; `wallet/movements` GET; `wallet/operations` GET; `spends` POST |
+| Отмены | `accrual-cancellations` POST; `spend-refunds` POST |
+| Рейтинги | `challenges/{id}/leaderboard` GET |
+| Экспорт | `statements` POST/GET/DELETE; `statements/{id}/download-links` POST (admin/заказчик) |
+| Аудит | `audit` GET (admin) |
+
+Полный контракт, схемы, ошибки, пагинация и повторы — в `openapi.yaml` (согласован с этим разделом).
+
+---
+
+## 8. Авторизация (D207)
+
+- **Проверка компании и области для каждого входного ID:** `employee/wallet/resource` — принадлежность компании; `campaign/resource` — набор кампании; `milestone/achievement` — компания; `integration/purchaseSystem` — компания; заказ выписки — заказчик/компания. Чужой ID → 404.
+- **Актуальные права перед replay:** отзыв grant/владения и активность проверяются до возврата сохранённого результата (B05).
+- **Service** не может вызывать персональные сценарии (кошелёк/выписка сотрудника); только разрешённые grants (T03).
+- **Владелец** не получает полный кошелёк участника (B03d); **Admin** не скачивает чужой заказ экспорта (B37a) — роль Admin даёт права на данные своей компании, но заказчик выписки — конкретное лицо.
+- Проверки реализуются в Application-входах (не только в middleware) и сохраняются при вызове из Worker и functional integration (D207/D211).
+
+---
+
+## 9. Нагрузка и поставка (T09–T10)
+
+Профиль: 10 000 сотрудников (основная компания) + 100 (другая); 3 ресурса, 10 кампаний × 10 заданий; 100 000 исторических событий и 100 000 движений; seed 42, подготовка через валидируемые use cases/batch (без невозможных INSERT). Ресурсы: два API по 1 CPU/1 GiB за балансировщиком; PostgreSQL 2 CPU/4 GiB; два worker суммарно 1 CPU/1 GiB; Valkey 0,5/0,5; S3 1/1; генератор отдельно.
+
+Открытая нагрузка: 100 req/s, 60 с прогрев, 300 с измерение; состав 50/25/10/10/5% (каталог/кошелёк/live leaderboard/новые события/списания); средств достаточно; доля завершений сообщается отдельно. Цели: p95 чтений ≤200 мс, записей ≤500 мс; p99 ≤1 с; корректных ответов ≥99,5%; без потерь/дублей/перерасхода. Доп. RPS 250/500/1000 — не заменяют основной профиль. Отчёт: planned/sent/completed RPS, goodput в 1 с, p95/p99 по видам, таймауты, ошибки, dropped, CPU/RAM, задержки БД; проверяется итоговое бизнес-состояние. Отдельные проходы: Valkey off 30 с, S3 off 30 с, один API off 10 с; PostgreSQL off — безопасный 503 и восстановление (не «бизнес-доступность»).
+
+На этапе реализации потребуются Compose, команды миграций/bootstrap/tests/load, `.env.example` без секретов, README ≤ 2 страниц, примеры Employee/Admin/Integration, версии и сырые результаты. **Сейчас — спроектирован контур, а не заявлены проведённые нагрузочные/runtime-проверки.**
+
+---
+
+## 10. Тестирование (T08/D211)
+
+- **Unit** — чистые правила, точные суммы, календарные границы (домен).
+- **Functional integration** — PostgreSQL 17/Valkey 9/S3: Arrange/Act/Assert через **штатные use cases или HTTP**, без прямых DbContext/DbSet/SQL/NpgsqlConnection и без обхода validation/authorization; управляемое время (`TimeProvider`), ограниченные ожидания, реальная конкуренция.
+- **HTTP/contract** — штатные JWT, middleware, ETag, статусы, схемы.
+- **Persistence/migration** — выделенная группа, где прямой EF/SQL допустим (создание/удаление БД, миграции — не запрещённая бизнес-подготовка).
+- **Architecture** — зависимости и запрещённые обращения; **отрицательный контроль**: компилируемое нарушение зависимости должно вызывать падение; для смысловых проверок правильный вариант проходит, ошибочный исполняется и падает по нужному правилу (ошибка сборки ≠ обнаружение бизнес-дефекта).
+- **E2E** — два процесса, конкуренция, рестарты, отказы, экспорт.
+- Expected выводится из бизнес-правил, не из production-калькулятора. Test-only auth handler не заменяет проверки JWT. Произвольный Sleep не заменяет синхронизацию.
+
+---
+
+## 11. Покрытие B01–B37 и T01–T10
+
+| ID | Где покрыто |
+|---|---|
+| B01–B02 | §3 `employee/wallet`, `UNIQUE(company_id, master_id)`, tenant-граница §8 |
+| B03–B05 | §8 политика доступа; §5.1 актуальность перед replay; §2 JWT (admin); RA4 §5.4; аудит `audit_entry` §3 |
+| B06–B07 | §3 `resource` (архив необратим, код не освобождается); §4.3 пакет с архивным ресурсом |
+| B08–B11 | §3 `campaign/stream/task`, аудитория кампании и задания (jsonb); §4.2 проверка обоих правил; §4.5 публикация |
+| B12–B17 | §3 `task/progress/event/completion`; §4.2 протокол приёма; `min(goal,old+increase)`; §4.6 целостность |
+| B18–B21 | §3.2 бюджеты; §4.3 пакетная награда; §4.4 ручное начисление; §4.5 |
+| B22–B28 | §3.2 кошелёк/движения; §4.4 списание/возврат/отмена; §5.1 повторы; §5.2 одна успешная отмена |
+| B29–B33 | §4.2 вехи/достижения; §4.5 финализация; §6.1 live leaderboard; счёт = credited |
+| B34–B37 | §7 выписки/экспорт; §6.2 снимок; §6.3 S3/удаление; §8 доступ к выписке |
+| E01–E12 | §4.6 и §13 (E01/E04/E05/E06/E07/E08/E09/E11) как проверяемые сценарии |
+| T01 | §1.1 стек, §1.4 фиксация |
+| T02 | §1.2–1.3 проекты/зависимости, §1.5 |
+| T03 | §2 JWT |
+| T04 | §7 REST, §7.2 ресурсы, openapi.yaml |
+| T05 | §5 повторы/числа/время; §5.2 отмена |
+| T06 | §6.1 кеш; §4.5 финализация/публикация рейтинга |
+| T07 | §6.2 снимок, §6.3 S3, §6.4 надёжность |
+| T08 | §10 тестирование |
+| T09 | §9 нагрузка |
+| T10 | §9 поставка |
+
+---
+
+## 12. Остаточные ограничения и открытые вопросы
+
+- **Проектные параметры (не бизнес-требования):** timeout/retry бюджеты (§6.4), значения 30 с/5 с свежести кеша и 5 с публикации рейтинга — выбраны нами, помечены как проектные (D209).
+- **Формат выписки** — CSV по контракту T07 (точный заголовок) — фиксирован.
+- Остаточных нерешённых бизнес-вопросов нет: RA1/RA2 закрыты, RA4 — явное уточнение. Если в ревью выявятся новые противоречия входов — будут вынесены отдельно, а не исправлены тайно.
+
+---
+
+## 13. Самопроверка (трассировка обязательных сценариев)
+
+| Сценарий | Результат |
+|---|---|
+| Два инициатора, одинаковый номер траты | разные операции (область `(company, initiator, kind, source_no)` — §5.1); каждый posted/declined по своим условиям |
+| Один инициатор повторяет ту же операцию через другой маршрут | второй эффект не возникает (инициатор — проверенная идентичность, не роль/маршрут; D201) |
+| Бюджет 10, две награды по 10 | одна Posted, одна Declined; бюджет 0; оба выполнения сохранены (E04) |
+| Баланс 10, две траты по 7 | одна Posted, одна Declined; баланс 3 (E05) |
+| Пакет 10 A + 2 B, бюджета B недостаточно | пакет Declined без движений; завершение/очки/вехи/рейтинг сохранены (E02) |
+| Отмена пакета сначала отклонена, позже средств достаточно | старый номер возвращает отказ; новый может провести полную отмену (D202/§5.2) |
+| Отзыв grant/владельца перед replay | новый запрос не обходит отзыв и не выдаёт запрещённый результат (§5.1/D207) |
+| Два завершения одновременно пересекают веху | очки не теряются; достижение не пропускается и не дублируется (§4.2/E10) |
+| Принятое событие до конца челленджа, ответ задержан | входит в единственный финальный результат (§4.5) |
+| Снимок зафиксирован, затем коммитится ранее начатое движение | состав из MVCC-снимка, не только timestamp (§6.2) |
+| Worker упал после upload; другой продолжил; одновременно удаление | нет нового снимка, повторной публикации удалённого и забытых объектов (§6.3) |
+| Кеш заполняется старым результатом после изменения данных | пределы 30/5 с не начинаются заново; актуальные права не обходятся (§6.1) |
