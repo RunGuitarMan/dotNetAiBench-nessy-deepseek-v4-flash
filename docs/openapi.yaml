@@ -1,0 +1,927 @@
+openapi: 3.0.3
+info:
+  title: Motiva API
+  version: 1.0.0
+  description: >
+    API платформы мотивационных кампаний. Версия пути /api/v1 — пользовательские и
+    административные сценарии; /internal/v1 — интеграции. Авторизация — JWT Bearer
+    (допущение, см. stage-2 §5.1/§7 C1). Идемпотентность повторов — через
+    Idempotency-Key либо натуральный номер источника (unique-ключи БД).
+servers:
+  - url: https://motiva.example.com
+security:
+  - bearerAuth: []
+tags:
+  - name: Campaigns
+  - name: Employee
+  - name: Wallet
+  - name: Ratings
+  - name: Statements
+  - name: Admin
+  - name: Integration
+
+paths:
+  /api/v1/campaigns:
+    get:
+      tags: [Campaigns]
+      operationId: listCampaigns
+      summary: Опубликованные кампании текущего сезона (сотрудник, B11h)
+      parameters:
+        - $ref: '#/components/parameters/Season'
+      responses:
+        '200':
+          description: Список кампаний
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CampaignSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/campaigns/{campaignId}:
+    get:
+      tags: [Campaigns]
+      operationId: getCampaign
+      summary: Детали кампании и стримы (сотрудник в аудитории)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+      responses:
+        '200':
+          description: Детали кампании
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CampaignSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Campaigns]
+      operationId: updateCampaign
+      summary: Настройка кампании (владелец, только до публикации, B08/B09)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CampaignUpsert' }
+      responses:
+        '200': { description: Обновлено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/campaigns/{campaignId}/publish:
+    post:
+      tags: [Campaigns]
+      operationId: publishCampaign
+      summary: Публикация кампании (владелец, B09)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+      responses:
+        '204': { description: Опубликована }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/campaigns/{campaignId}/tasks/{taskId}/archive:
+    post:
+      tags: [Campaigns]
+      operationId: archiveTask
+      summary: Архив задания (владелец, B09g)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+        - { $ref: '#/components/parameters/TaskId' }
+      responses:
+        '204': { description: Архив }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/campaigns/{campaignId}/results:
+    get:
+      tags: [Campaigns]
+      operationId: getCampaignResults
+      summary: Результаты кампании (владелец, B34b)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+        - { $ref: '#/components/parameters/Offset' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/campaigns/{campaignId}/expenses:
+    get:
+      tags: [Campaigns]
+      operationId: getCampaignExpenses
+      summary: Расходы своей кампании (владелец, B34b/B35e)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+      responses:
+        '200':
+          description: Расходы по ресурсам
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExpensesView' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/campaigns/{campaignId}/accruals:
+    post:
+      tags: [Campaigns]
+      operationId: manualAccrual
+      summary: Ручное начисление одного ресурса участнику (владелец/админ, B21)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccrualRequest' }
+      responses:
+        '201':
+          description: Начисление проведено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResult' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/campaigns/{campaignId}/accruals/{accrualId}/cancel:
+    post:
+      tags: [Campaigns]
+      operationId: cancelAccrual
+      summary: Отмена начисления своей кампании (владелец/админ, B26)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+        - { $ref: '#/components/parameters/OperationId' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/tasks/{taskId}/progress:
+    get:
+      tags: [Employee]
+      operationId: getMyProgress
+      summary: Мой прогресс по заданию за период (B34a)
+      parameters:
+        - { $ref: '#/components/parameters/TaskId' }
+        - { $ref: '#/components/parameters/Period' }
+      responses:
+        '200':
+          description: Прогресс
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProgressView' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/streams/{streamId}/score:
+    get:
+      tags: [Employee]
+      operationId: getMyStreamScore
+      summary: Мои очки стрима за сезон (B29)
+      parameters:
+        - { $ref: '#/components/parameters/StreamId' }
+      responses:
+        '200':
+          description: Очки
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StreamScoreView' }
+  /api/v1/achievements:
+    get:
+      tags: [Employee]
+      operationId: getMyAchievements
+      summary: Мои достижения по сезонам (B30/B34a)
+      parameters:
+        - { $ref: '#/components/parameters/Season' }
+      responses:
+        '200':
+          description: Достижения
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AchievementView' }
+  /api/v1/wallet:
+    get:
+      tags: [Wallet]
+      operationId: getWallet
+      summary: Баланс по ресурсам (сотрудник, B22c)
+      responses:
+        '200':
+          description: Кошелёк
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WalletView' }
+  /api/v1/wallet/movements:
+    get:
+      tags: [Wallet]
+      operationId: getMovements
+      summary: Движения кошелька (B28/B34d)
+      parameters:
+        - { $ref: '#/components/parameters/Offset' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/ResourceFilter' }
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/To' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+  /api/v1/wallet/operations:
+    get:
+      tags: [Wallet]
+      operationId: getOperations
+      summary: История операций, включая отказы (B28)
+      parameters:
+        - { $ref: '#/components/parameters/Offset' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+  /api/v1/wallet/spend:
+    post:
+      tags: [Wallet]
+      operationId: spend
+      summary: Трата из кошелька (сотрудник, B23)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SpendRequest' }
+      responses:
+        '201':
+          description: Трата проведена
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/ratings/{challengeId}:
+    get:
+      tags: [Ratings]
+      operationId: getRating
+      summary: Первые N участников и своё место (B32)
+      parameters:
+        - { $ref: '#/components/parameters/ChallengeId' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Рейтинг
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RatingView' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/statements:
+    post:
+      tags: [Statements]
+      operationId: createStatement
+      summary: Заказать выписку (сотрудник/админ, B35)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatementRequest' }
+      responses:
+        '202':
+          description: Выписка принята в очередь
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatementRef' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /api/v1/statements/{statementId}:
+    get:
+      tags: [Statements]
+      operationId: getStatement
+      summary: Статус/скачивание выписки (заказчик, B36/B37)
+      parameters:
+        - { $ref: '#/components/parameters/StatementId' }
+      responses:
+        '200':
+          description: Состояние и ссылка на файл
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatementRef' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+    delete:
+      tags: [Statements]
+      operationId: deleteStatement
+      summary: Удалить выписку (заказчик, B37)
+      parameters:
+        - { $ref: '#/components/parameters/StatementId' }
+      responses:
+        '204': { description: Удалена }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/admin/resources:
+    get:
+      tags: [Admin]
+      operationId: listResources
+      summary: Список ресурсов (админ, B06)
+      responses:
+        '200':
+          description: Ресурсы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Resource' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Admin]
+      operationId: createResource
+      summary: Создать ресурс (админ, B06)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResourceUpsert' }
+      responses:
+        '201': { $ref: '#/components/responses/Page' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/resources/{resourceId}/archive:
+    post:
+      tags: [Admin]
+      operationId: archiveResource
+      summary: Архивировать ресурс (админ, B07)
+      parameters:
+        - { $ref: '#/components/parameters/ResourceId' }
+      responses:
+        '204': { description: Архив }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/employees:
+    get:
+      tags: [Admin]
+      operationId: listEmployees
+      summary: Список сотрудников (админ, B01)
+      responses:
+        '200':
+          description: Сотрудники
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Employee' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Admin]
+      operationId: createEmployee
+      summary: Создать профиль сотрудника (админ, B01)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmployeeUpsert' }
+      responses:
+        '201': { description: Создан }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/employees/{employeeId}/status:
+    put:
+      tags: [Admin]
+      operationId: setEmployeeStatus
+      summary: Активация/блокировка (админ, B05)
+      parameters:
+        - { $ref: '#/components/parameters/EmployeeId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusUpdate' }
+      responses:
+        '204': { description: Обновлено }
+  /api/v1/admin/campaigns:
+    get:
+      tags: [Admin]
+      operationId: listCampaignsAdmin
+      summary: Список кампаний компании (админ, B03/B08)
+      responses:
+        '200':
+          description: Кампании
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CampaignSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/admin/campaigns/{campaignId}/budget:
+    post:
+      tags: [Admin]
+      operationId: allocateBudget
+      summary: Выделение/увеличение бюджета по ресурсу (админ, B18)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BudgetAllocationRequest' }
+      responses:
+        '201':
+          description: Бюджет выделен
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/purchase-systems:
+    get:
+      tags: [Admin]
+      operationId: listPurchaseSystems
+      summary: Системы покупок и принимаемые ресурсы (админ, B23d)
+      responses:
+        '200':
+          description: Системы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PurchaseSystem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/admin/integrations/{integrationId}/permissions:
+    put:
+      tags: [Admin]
+      operationId: setIntegrationPermissions
+      summary: Разрешения интеграции (админ, B04)
+      parameters:
+        - { $ref: '#/components/parameters/IntegrationId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IntegrationPermissions' }
+      responses:
+        '204': { description: Обновлено }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/admin/accruals/{accrualId}/cancel:
+    post:
+      tags: [Admin]
+      operationId: adminCancelAccrual
+      summary: Отмена начисления любой кампании (админ, B26)
+      parameters:
+        - { $ref: '#/components/parameters/OperationId' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/spends/{spendId}/refund:
+    post:
+      tags: [Admin]
+      operationId: refundSpend
+      summary: Возврат по трате (админ, B27)
+      parameters:
+        - { $ref: '#/components/parameters/OperationId' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/statements:
+    post:
+      tags: [Admin]
+      operationId: createAdminStatement
+      summary: Выписка за сотрудника/компанию (админ, B35)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatementRequest' }
+      responses:
+        '202':
+          description: Принята
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatementRef' }
+  /api/v1/admin/audit:
+    get:
+      tags: [Admin]
+      operationId: listAudit
+      summary: История изменений прав/настроек/бюджета (админ, B28d)
+      parameters:
+        - { $ref: '#/components/parameters/Offset' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/events:
+    post:
+      tags: [Integration]
+      operationId: transmitProgress
+      summary: Передать прогресс (интеграция, разрешение progress, B14)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProgressEventRequest' }
+      responses:
+        '201':
+          description: Событие принято
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /internal/v1/accruals:
+    post:
+      tags: [Integration]
+      operationId: integrationAccrual
+      summary: Начисление из бюджета (интеграция, разрешение accrual, B21b)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InternalAccrualRequest' }
+      responses:
+        '201':
+          description: Начислено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /internal/v1/spends:
+    post:
+      tags: [Integration]
+      operationId: integrationSpend
+      summary: Списание для системы покупок (интеграция, разрешение spend, B23)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InternalSpendRequest' }
+      responses:
+        '201':
+          description: Списано
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /internal/v1/spends/{spendId}/refund:
+    post:
+      tags: [Integration]
+      operationId: integrationRefund
+      summary: Возврат по своей трате (та же система покупок + разрешение, B27)
+      parameters:
+        - { $ref: '#/components/parameters/OperationId' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /internal/v1/operations:
+    get:
+      tags: [Integration]
+      operationId: integrationOperations
+      summary: Только своя история операций (B04c)
+      parameters:
+        - { $ref: '#/components/parameters/Offset' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { $ref: '#/components/responses/Page' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    CampaignId: { name: campaignId, in: path, required: true, schema: { type: integer } }
+    TaskId: { name: taskId, in: path, required: true, schema: { type: integer } }
+    StreamId: { name: streamId, in: path, required: true, schema: { type: integer } }
+    ChallengeId: { name: challengeId, in: path, required: true, schema: { type: integer } }
+    StatementId: { name: statementId, in: path, required: true, schema: { type: integer } }
+    OperationId: { name: operationId, in: path, required: true, schema: { type: integer } }
+    ResourceId: { name: resourceId, in: path, required: true, schema: { type: integer } }
+    EmployeeId: { name: employeeId, in: path, required: true, schema: { type: integer } }
+    IntegrationId: { name: integrationId, in: path, required: true, schema: { type: integer } }
+    Season:
+      name: season
+      in: query
+      required: false
+      schema: { type: integer }
+    Period:
+      name: period
+      in: query
+      required: false
+      schema: { type: string, enum: [day, month, quarter, halfyear, year] }
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, default: 0 }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    ResourceFilter:
+      name: resource
+      in: query
+      required: false
+      schema: { type: integer }
+    From:
+      name: from
+      in: query
+      required: false
+      schema: { type: string, format: date-time }
+    To:
+      name: to
+      in: query
+      required: false
+      schema: { type: string, format: date-time }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string }
+  responses:
+    Unauthorized:
+      description: Не авторизован
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Недостаточно прав
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Не найдено
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Конфликт/повтор/недостаточно средств
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unprocessable:
+      description: Некорректные данные/нарушение бизнес-правила
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Gone:
+      description: Выписка удалена
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Page:
+      description: Страница результатов
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Page' }
+  schemas:
+    Problem:
+      type: object
+      required: [status, title, detail, code]
+      properties:
+        status: { type: integer, example: 409 }
+        title: { type: string }
+        detail: { type: string }
+        code:
+          type: string
+          enum: [validation_error, not_found, forbidden, conflict, insufficient_funds, resource_unavailable, unprocessable, gone, internal]
+        idempotency-result:
+          type: object
+          description: Исходный результат повторяемой операции (при повторе)
+          additionalProperties: true
+        instance: { type: string }
+    Page:
+      type: object
+      required: [items, total, offset, limit]
+      properties:
+        items:
+          type: array
+          items: { type: object }
+        total: { type: integer }
+        offset: { type: integer }
+        limit: { type: integer }
+    CampaignSummary:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        name: { type: string }
+        season: { type: integer }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        streams:
+          type: array
+          items: { $ref: '#/components/schemas/StreamSummary' }
+    StreamSummary:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        name: { type: string }
+    CampaignUpsert:
+      type: object
+      required: [name, description, audience]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        audience: { $ref: '#/components/schemas/Audience' }
+    Audience:
+      type: object
+      properties:
+        any:
+          type: array
+          items: { type: string }
+        all:
+          type: array
+          items: { type: string }
+        none:
+          type: array
+          items: { type: string }
+    AccrualRequest:
+      type: object
+      required: [employeeId, resourceId, amount, reason]
+      properties:
+        employeeId: { type: integer }
+        resourceId: { type: integer }
+        amount: { type: integer, minimum: 1 }
+        reason: { type: string }
+    OperationResult:
+      type: object
+      required: [result]
+      properties:
+        result: { type: string, enum: [accepted, rejected] }
+        operationId: { type: integer }
+        reason: { type: string }
+    ProgressView:
+      type: object
+      properties:
+        taskId: { type: integer }
+        period: { type: string }
+        value: { type: integer }
+        goal: { type: integer }
+        completed: { type: boolean }
+    StreamScoreView:
+      type: object
+      properties:
+        streamId: { type: integer }
+        season: { type: integer }
+        points: { type: integer }
+    AchievementView:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        name: { type: string }
+        season: { type: integer }
+        grantedAt: { type: string, format: date-time }
+    WalletView:
+      type: object
+      properties:
+        balances:
+          type: array
+          items:
+            type: object
+            properties:
+              resourceId: { type: integer }
+              code: { type: string }
+              balance: { type: integer }
+    SpendRequest:
+      type: object
+      required: [resourceId, amount, purchaseSystemId]
+      properties:
+        resourceId: { type: integer }
+        amount: { type: integer, minimum: 1 }
+        purchaseSystemId: { type: integer }
+    RatingView:
+      type: object
+      properties:
+        limit: { type: integer }
+        top:
+          type: array
+          items:
+            type: object
+            properties:
+              masterId: { type: string }
+              score: { type: integer }
+              place: { type: integer }
+        own:
+          type: object
+          properties:
+            masterId: { type: string }
+            score: { type: integer }
+            place: { type: integer }
+    StatementRequest:
+      type: object
+      required: [from, to]
+      properties:
+        employeeId: { type: integer, description: "админ: выбранный сотрудник или пусто (вся компания)" }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        resourceId: { type: integer, description: один ресурс или пусто (все) }
+    StatementRef:
+      type: object
+      properties:
+        id: { type: integer }
+        state: { type: string, enum: [pending, forming, ready, error, deleted] }
+        url: { type: string, nullable: true, description: ссылка на файл в state=ready }
+    Resource:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [active, archived] }
+    ResourceUpsert:
+      type: object
+      required: [code, name]
+      properties:
+        code: { type: string }
+        name: { type: string }
+    Employee:
+      type: object
+      properties:
+        id: { type: integer }
+        masterId: { type: string }
+        isActive: { type: boolean }
+        tags:
+          type: array
+          items: { type: string }
+    EmployeeUpsert:
+      type: object
+      required: [masterId, tags]
+      properties:
+        masterId: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+    StatusUpdate:
+      type: object
+      required: [isActive]
+      properties:
+        isActive: { type: boolean }
+    BudgetAllocationRequest:
+      type: object
+      required: [resourceId, amount]
+      properties:
+        resourceId: { type: integer }
+        amount: { type: integer, minimum: 1 }
+    PurchaseSystem:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        resources:
+          type: array
+          items: { type: integer }
+    IntegrationPermissions:
+      type: object
+      properties:
+        progress:
+          type: array
+          items: { type: integer, description: campaignId }
+        accrual:
+          type: array
+          items:
+            type: object
+            properties:
+              campaignId: { type: integer }
+              resourceId: { type: integer }
+        spend:
+          type: array
+          items:
+            type: object
+            properties:
+              resourceId: { type: integer }
+              purchaseSystemId: { type: integer }
+    ProgressEventRequest:
+      type: object
+      required: [employeeId, taskId, increase, sourceEventNo]
+      properties:
+        employeeId: { type: integer }
+        taskId: { type: integer }
+        increase: { type: integer, minimum: 1 }
+        sourceEventNo: { type: string }
+    EventResult:
+      type: object
+      properties:
+        accepted: { type: boolean }
+        creditedIncrease: { type: integer }
+        completed: { type: boolean }
+        reward:
+          type: object
+          nullable: true
+          properties:
+            result: { type: string, enum: [granted, rejected] }
+            reason: { type: string }
+        idempotent: { type: boolean, description: true — повтор уже принятого события }
+    InternalAccrualRequest:
+      type: object
+      required: [campaignId, employeeId, resourceId, amount]
+      properties:
+        campaignId: { type: integer }
+        employeeId: { type: integer }
+        resourceId: { type: integer }
+        amount: { type: integer, minimum: 1 }
+    InternalSpendRequest:
+      type: object
+      required: [employeeId, resourceId, amount, purchaseSystemId]
+      properties:
+        employeeId: { type: integer }
+        resourceId: { type: integer }
+        amount: { type: integer, minimum: 1 }
+        purchaseSystemId: { type: integer }
+    ExpensesView:
+      type: object
+      properties:
+        byResource:
+          type: array
+          items:
+            type: object
+            properties:
+              resourceId: { type: integer }
+              spent: { type: integer }
+              budgetRemaining: { type: integer }
