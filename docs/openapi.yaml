@@ -1,15 +1,16 @@
 openapi: 3.0.3
 info:
   title: Motiva API
-  version: 2.0.0
+  version: 2.1.0
   description: >
     API платформы мотивационных кампаний. /api/v1 — пользовательские и административные
-    сценарии; /internal/v1 — интеграции. Авторизация — JWT (договор T03): iss=motiva-benchmark,
-    aud=motiva-api, HS256, claims companyId (UUID), actorType (user|service), masterId (Int32, user),
-    role (Employee, Admin). Владелец кампании определяется записью, не ролью.
-    Без action-путей: изменение настроек — PATCH (If-Match/ETag), отмены/возвраты — отдельные ресурсы.
-    Экономический отказ корректной операции — 201 с OperationOutcome.status=declined.
-    Повторы: бизнес-номер (бессрочно) либо Idempotency-Key (>=24ч).
+    сценарии; /internal/v1 — интеграции (сервис). Авторизация — JWT (договор 03_AUTH.md):
+    iss=motiva-benchmark, aud=motiva-api, HS256, claims companyId (UUID), actorType (user|service),
+    masterId (Int32, user), role (Employee, Admin). Владелец кампании определяется записью, не ролью.
+    Без action-путей: изменения настройки — PATCH/DELETE (If-Match/ETag), отмены/возвраты/выделения —
+    отдельные ресурсы. Экономический отказ корректной операции — 201 с OperationOutcome.status=declined.
+    Повторы: экономические операции используют бессрочный бизнес-номер источника (заголовок Idempotency-Key,
+    область (company, initiator_key, kind, номер)); создание настроек — транспортный Idempotency-Key (>=24ч).
 servers:
   - url: https://motiva.example.com
 security:
@@ -17,6 +18,7 @@ security:
 
 tags:
   - name: Employees
+  - name: Integrations
   - name: Resources
   - name: Campaigns
   - name: Streams
@@ -25,15 +27,17 @@ tags:
   - name: Challenges
   - name: Achievements
   - name: Budgets
-  - name: Integrations
   - name: PurchaseSystems
+  - name: Me
   - name: Wallet
+  - name: Operations
   - name: Cancellations
   - name: Statements
   - name: Audit
   - name: Integration
 
 paths:
+  # ================= Сотрудники (admin) =================
   /api/v1/employees:
     get:
       tags: [Employees]
@@ -44,11 +48,14 @@ paths:
         - { $ref: '#/components/parameters/PageSize' }
       responses:
         '200': { $ref: '#/components/responses/EmployeePageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [Employees]
       operationId: createEmployee
       summary: Создать профиль сотрудника (admin, B01); создаётся ровно один кошелёк
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -71,7 +78,7 @@ paths:
     patch:
       tags: [Employees]
       operationId: updateEmployee
-      summary: Изменение тегов, владельца, статуса активности (admin, B01/B05)
+      summary: Изменение тегов, статуса активности (admin, B01/B05). Назначение владельца — через кампанию.
       parameters:
         - { $ref: '#/components/parameters/EmployeeId' }
         - { $ref: '#/components/parameters/IfMatch' }
@@ -83,16 +90,71 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/EmployeeOK' }
         '400': { $ref: '#/components/responses/BadRequest' }
-        '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         '412': { $ref: '#/components/responses/PreconditionFailed' }
         '428': { $ref: '#/components/responses/PreconditionRequired' }
 
+  # ================= Интеграции (admin) =================
+  /api/v1/integrations:
+    get:
+      tags: [Integrations]
+      operationId: listIntegrations
+      summary: Список интеграций компании (admin)
+      parameters:
+        - { $ref: '#/components/parameters/PageCursor' }
+        - { $ref: '#/components/parameters/PageSize' }
+      responses:
+        '200': { $ref: '#/components/responses/IntegrationPageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Integrations]
+      operationId: createIntegration
+      summary: Зарегистрировать интеграцию (admin, B04/T03); связь с проверенным service sub и компанией
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IntegrationCreate' }
+      responses:
+        '201': { $ref: '#/components/responses/IntegrationCreated' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/integrations/{integrationId}/grants:
+    get:
+      tags: [Integrations]
+      operationId: listIntegrationGrants
+      summary: Разрешения интеграции (admin, B04)
+      parameters:
+        - { $ref: '#/components/parameters/IntegrationId' }
+      responses:
+        '200': { $ref: '#/components/responses/IntegrationGrantPageResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Integrations]
+      operationId: replaceIntegrationGrants
+      summary: Замена разрешений интеграции (admin, B04); отзыв действует сразу
+      parameters:
+        - { $ref: '#/components/parameters/IntegrationId' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IntegrationGrantList' }
+      responses:
+        '200': { $ref: '#/components/responses/IntegrationGrantPageResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+
+  # ================= Ресурсы (admin) =================
   /api/v1/resources:
     get:
       tags: [Resources]
       operationId: listResources
-      summary: Список ресурсов (admin)
+      summary: Список ресурсов компании (admin)
       parameters:
         - { $ref: '#/components/parameters/PageCursor' }
         - { $ref: '#/components/parameters/PageSize' }
@@ -102,6 +164,8 @@ paths:
       tags: [Resources]
       operationId: createResource
       summary: Создать ресурс (admin, B06)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -109,6 +173,7 @@ paths:
             schema: { $ref: '#/components/schemas/ResourceCreate' }
       responses:
         '201': { $ref: '#/components/responses/ResourceCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/resources/{resourceId}:
     get:
@@ -134,25 +199,31 @@ paths:
             schema: { $ref: '#/components/schemas/ResourcePatch' }
       responses:
         '200': { $ref: '#/components/responses/ResourceOK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
         '412': { $ref: '#/components/responses/PreconditionFailed' }
         '428': { $ref: '#/components/responses/PreconditionRequired' }
 
+  # ================= Кампании =================
   /api/v1/campaigns:
     get:
       tags: [Campaigns]
       operationId: listCampaigns
-      summary: Опубликованные кампании текущего сезона (сотрудник, B11h)
+      summary: "Кампании. Область выборки по роли: сотрудник — опубликованные текущего сезона; владелец/admin — свои черновики и исторические (query scope)."
       parameters:
         - { $ref: '#/components/parameters/PageCursor' }
         - { $ref: '#/components/parameters/PageSize' }
         - { $ref: '#/components/parameters/Season' }
+        - { $ref: '#/components/parameters/CampaignScope' }
       responses:
         '200': { $ref: '#/components/responses/CampaignPageResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       tags: [Campaigns]
       operationId: createCampaign
       summary: Создать кампанию (черновик, admin/владелец, B08)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -160,12 +231,13 @@ paths:
             schema: { $ref: '#/components/schemas/CampaignCreate' }
       responses:
         '201': { $ref: '#/components/responses/CampaignCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/campaigns/{campaignId}:
     get:
       tags: [Campaigns]
       operationId: getCampaign
-      summary: Детали кампании и стримы (сотрудник в аудитории/владелец/admin)
+      summary: Детали кампании и стримов (в аудитории/владелец/admin)
       parameters:
         - { $ref: '#/components/parameters/CampaignId' }
       responses:
@@ -175,7 +247,7 @@ paths:
     patch:
       tags: [Campaigns]
       operationId: updateCampaign
-      summary: Изменение настройки; публикация (status=published) и архив (status=archived) (B09)
+      summary: Изменение настройки; публикация (status=published) и архив (status=archived) (B09). Поля делятся на до/после/никогда (§2).
       parameters:
         - { $ref: '#/components/parameters/CampaignId' }
         - { $ref: '#/components/parameters/IfMatch' }
@@ -193,12 +265,15 @@ paths:
     delete:
       tags: [Campaigns]
       operationId: deleteCampaignDraft
-      summary: Удалить черновик целиком (admin/владелец, B09i); опубликованное удалять нельзя
+      summary: Удалить черновик (admin/владелец, B09i). Опубликованное нельзя. Черновик с проведёнными выделениями/аудитом удаляется логически (история сохраняется).
       parameters:
         - { $ref: '#/components/parameters/CampaignId' }
+        - { $ref: '#/components/parameters/IfMatch' }
       responses:
         '204': { description: Удалён черновик }
         '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
   /api/v1/campaigns/{campaignId}/streams:
     get:
       tags: [Campaigns]
@@ -216,6 +291,7 @@ paths:
       summary: Создать стрим (владелец/admin до публикации, B08)
       parameters:
         - { $ref: '#/components/parameters/CampaignId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -223,29 +299,27 @@ paths:
             schema: { $ref: '#/components/schemas/StreamCreate' }
       responses:
         '201': { $ref: '#/components/responses/StreamCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/campaigns/{campaignId}/budgets:
     get:
       tags: [Budgets]
       operationId: listBudgets
-      summary: Бюджеты кампании по ресурсам (владелец/admin, B19)
+      summary: Бюджеты кампании по ресурсам (владелец/admin, B19). Список T04.
       parameters:
         - { $ref: '#/components/parameters/CampaignId' }
+        - { $ref: '#/components/parameters/PageCursor' }
+        - { $ref: '#/components/parameters/PageSize' }
       responses:
-        '200':
-          description: Бюджеты по ресурсам
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Budget' }
+        '200': { $ref: '#/components/responses/BudgetPageResponse' }
   /api/v1/campaigns/{campaignId}/budget-allocations:
     post:
       tags: [Budgets]
       operationId: allocateBudget
-      summary: Выделение/увеличение бюджета по ресурсу (только admin, B18)
+      summary: Выделение/увеличение бюджета по ресурсу (только admin, B18). Бизнес-номер источника обязателен.
       parameters:
         - { $ref: '#/components/parameters/CampaignId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -255,7 +329,30 @@ paths:
         '201': { $ref: '#/components/responses/OperationOutcome' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/campaigns/{campaignId}/results:
+    get:
+      tags: [Campaigns]
+      operationId: getCampaignResults
+      summary: Результаты кампании (владелец/admin, B34b). Не открывает полный кошелёк/посторонние покупки.
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+        - { $ref: '#/components/parameters/PageCursor' }
+        - { $ref: '#/components/parameters/PageSize' }
+      responses:
+        '200': { $ref: '#/components/responses/CampaignResultsResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/campaigns/{campaignId}/expenses:
+    get:
+      tags: [Campaigns]
+      operationId: getCampaignExpenses
+      summary: Расходы своей кампании по ресурсам (владелец/admin, B34b/B35e)
+      parameters:
+        - { $ref: '#/components/parameters/CampaignId' }
+      responses:
+        '200': { $ref: '#/components/responses/ExpensesResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
+  # ================= Стримы / Задания / Вехи =================
   /api/v1/streams/{streamId}:
     get:
       tags: [Streams]
@@ -269,7 +366,7 @@ paths:
     patch:
       tags: [Streams]
       operationId: updateStream
-      summary: Изменение; архив (status=archived) (B09g)
+      summary: Изменение названия/аудитории до публикации; архив (status=archived) (B09g)
       parameters:
         - { $ref: '#/components/parameters/StreamId' }
         - { $ref: '#/components/parameters/IfMatch' }
@@ -300,6 +397,7 @@ paths:
       summary: Создать задание (владелец/admin до публикации, B12)
       parameters:
         - { $ref: '#/components/parameters/StreamId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -307,6 +405,7 @@ paths:
             schema: { $ref: '#/components/schemas/TaskCreate' }
       responses:
         '201': { $ref: '#/components/responses/TaskCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/tasks/{taskId}:
     get:
@@ -321,7 +420,7 @@ paths:
     patch:
       tags: [Tasks]
       operationId: updateTask
-      summary: Изменение; архив (status=archived) (B09g)
+      summary: Настройка задания до публикации (цель, периодичность, очки, награды, аудитория); после публикации — только status (архив). (B09/B12)
       parameters:
         - { $ref: '#/components/parameters/TaskId' }
         - { $ref: '#/components/parameters/IfMatch' }
@@ -332,6 +431,7 @@ paths:
             schema: { $ref: '#/components/schemas/TaskPatch' }
       responses:
         '200': { $ref: '#/components/responses/TaskOK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
         '412': { $ref: '#/components/responses/PreconditionFailed' }
         '428': { $ref: '#/components/responses/PreconditionRequired' }
@@ -339,23 +439,20 @@ paths:
     get:
       tags: [Milestones]
       operationId: listMilestones
-      summary: Вехи стрима (владелец/admin)
+      summary: Вехи стрима (владелец/admin, B29). Список T04.
       parameters:
         - { $ref: '#/components/parameters/StreamId' }
+        - { $ref: '#/components/parameters/PageCursor' }
+        - { $ref: '#/components/parameters/PageSize' }
       responses:
-        '200':
-          description: Вехи
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Milestone' }
+        '200': { $ref: '#/components/responses/MilestonePageResponse' }
     post:
       tags: [Milestones]
       operationId: createMilestone
       summary: Создать веху (владелец/admin до публикации, B29)
       parameters:
         - { $ref: '#/components/parameters/StreamId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -363,6 +460,7 @@ paths:
             schema: { $ref: '#/components/schemas/MilestoneCreate' }
       responses:
         '201': { $ref: '#/components/responses/MilestoneCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/milestones/{milestoneId}:
     get:
@@ -374,7 +472,37 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/MilestoneOK' }
         '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Milestones]
+      operationId: updateMilestone
+      summary: Изменение порога/достижения до публикации (B29)
+      parameters:
+        - { $ref: '#/components/parameters/MilestoneId' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MilestonePatch' }
+      responses:
+        '200': { $ref: '#/components/responses/MilestoneOK' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+    delete:
+      tags: [Milestones]
+      operationId: deleteMilestone
+      summary: Удалить веху до публикации (владелец/admin)
+      parameters:
+        - { $ref: '#/components/parameters/MilestoneId' }
+        - { $ref: '#/components/parameters/IfMatch' }
+      responses:
+        '204': { description: Удалена }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
 
+  # ================= Челленджи / Рейтинг =================
   /api/v1/challenges:
     get:
       tags: [Challenges]
@@ -389,6 +517,8 @@ paths:
       tags: [Challenges]
       operationId: createChallenge
       summary: Создать челлендж по стриму (владелец/admin до публикации, B31)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -396,6 +526,7 @@ paths:
             schema: { $ref: '#/components/schemas/ChallengeCreate' }
       responses:
         '201': { $ref: '#/components/responses/ChallengeCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/challenges/{challengeId}:
     get:
@@ -411,18 +542,25 @@ paths:
     get:
       tags: [Challenges]
       operationId: getLeaderboard
-      summary: Live-рейтинг top N и своё место (B32)
+      summary: Live-рейтинг top N (B32)
       parameters:
         - { $ref: '#/components/parameters/ChallengeId' }
         - { $ref: '#/components/parameters/PageSize' }
       responses:
-        '200':
-          description: Рейтинг
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Leaderboard' }
+        '200': { $ref: '#/components/responses/LeaderboardOK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/challenges/{challengeId}/own:
+    get:
+      tags: [Challenges]
+      operationId: getOwnRating
+      summary: Собственное место (отдельная операция, T04). Может отсутствовать у читателя без события.
+      parameters:
+        - { $ref: '#/components/parameters/ChallengeId' }
+      responses:
+        '200': { $ref: '#/components/responses/OwnRatingOK' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  # ================= Достижения =================
   /api/v1/achievements:
     get:
       tags: [Achievements]
@@ -437,6 +575,8 @@ paths:
       tags: [Achievements]
       operationId: createAchievement
       summary: Создать определение достижения (admin, B29e/B30)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -444,6 +584,7 @@ paths:
             schema: { $ref: '#/components/schemas/AchievementCreate' }
       responses:
         '201': { $ref: '#/components/responses/AchievementCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/achievements/{achievementId}:
     get:
@@ -484,59 +625,12 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/AchievementGrantPageResponse' }
 
-  /api/v1/integrations:
-    get:
-      tags: [Integrations]
-      operationId: listIntegrations
-      summary: Интеграции (admin)
-      parameters:
-        - { $ref: '#/components/parameters/PageCursor' }
-        - { $ref: '#/components/parameters/PageSize' }
-      responses:
-        '200': { $ref: '#/components/responses/IntegrationPageResponse' }
-  /api/v1/integrations/{integrationId}/grants:
-    get:
-      tags: [Integrations]
-      operationId: listIntegrationGrants
-      summary: Разрешения интеграции (admin, B04)
-      parameters:
-        - { $ref: '#/components/parameters/IntegrationId' }
-      responses:
-        '200':
-          description: Grants
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/IntegrationGrant' }
-    put:
-      tags: [Integrations]
-      operationId: replaceIntegrationGrants
-      summary: Замена разрешений интеграции (admin, B04); отзыв действует сразу
-      parameters:
-        - { $ref: '#/components/parameters/IntegrationId' }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: array
-              items: { $ref: '#/components/schemas/IntegrationGrant' }
-      responses:
-        '200':
-          description: Обновлено
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/IntegrationGrant' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-
+  # ================= Системы покупок =================
   /api/v1/purchase-systems:
     get:
       tags: [PurchaseSystems]
       operationId: listPurchaseSystems
-      summary: Системы покупок (admin)
+      summary: Системы покупок и принимаемые ресурсы (admin; сотрудник — доступные для траты)
       parameters:
         - { $ref: '#/components/parameters/PageCursor' }
         - { $ref: '#/components/parameters/PageSize' }
@@ -546,6 +640,8 @@ paths:
       tags: [PurchaseSystems]
       operationId: createPurchaseSystem
       summary: Создать систему покупок (admin, B23d)
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         required: true
         content:
@@ -553,11 +649,12 @@ paths:
             schema: { $ref: '#/components/schemas/PurchaseSystemCreate' }
       responses:
         '201': { $ref: '#/components/responses/PurchaseSystemCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
   /api/v1/purchase-systems/{purchaseSystemId}:
     get:
       tags: [PurchaseSystems]
       operationId: getPurchaseSystem
-      summary: Система покупок и принимаемые ресурсы (admin)
+      summary: Система покупок и принимаемые ресурсы (admin/сотрудник для выбора траты)
       parameters:
         - { $ref: '#/components/parameters/PurchaseSystemId' }
       responses:
@@ -586,6 +683,7 @@ paths:
       summary: Принимаемые ресурсы системы покупок (admin, B23d)
       parameters:
         - { $ref: '#/components/parameters/PurchaseSystemId' }
+        - { $ref: '#/components/parameters/IfMatch' }
       requestBody:
         required: true
         content:
@@ -594,15 +692,56 @@ paths:
               type: array
               items: { type: integer, format: int64 }
       responses:
-        '200':
-          description: Обновлено
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { type: integer, format: int64 }
+        '200': { $ref: '#/components/responses/ResourceIdListOK' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
 
+  # ================= Личные чтения (сотрудник) =================
+  /api/v1/me/catalog:
+    get:
+      tags: [Me]
+      operationId: getMyCatalog
+      summary: Доступные опубликованные кампании и задания текущего сезона (B11/B34). Фильтрация по актуальным правам/аудитории.
+      parameters:
+        - { $ref: '#/components/parameters/PageCursor' }
+        - { $ref: '#/components/parameters/PageSize' }
+      responses:
+        '200': { $ref: '#/components/responses/CatalogResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/me/progress:
+    get:
+      tags: [Me]
+      operationId: getMyProgress
+      summary: Мой прогресс по заданиям за период (B34a)
+      parameters:
+        - { $ref: '#/components/parameters/PageCursor' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/Period' }
+        - { $ref: '#/components/parameters/TaskIdOptional' }
+      responses:
+        '200': { $ref: '#/components/responses/ProgressPageResponse' }
+  /api/v1/me/streams/{streamId}/score:
+    get:
+      tags: [Me]
+      operationId: getMyStreamScore
+      summary: Мои очки стрима за сезон (B29/B34a)
+      parameters:
+        - { $ref: '#/components/parameters/StreamId' }
+      responses:
+        '200': { $ref: '#/components/responses/StreamScoreOK' }
+  /api/v1/me/tasks/{taskId}/reward:
+    get:
+      tags: [Me]
+      operationId: getMyReward
+      summary: "Результат награждения по заданию (B34a): выданная награда, отсутствие награды, отказ с причиной."
+      parameters:
+        - { $ref: '#/components/parameters/TaskId' }
+        - { $ref: '#/components/parameters/Period' }
+      responses:
+        '200': { $ref: '#/components/responses/RewardOK' }
+
+  # ================= Кошелёк (сотрудник) =================
   /api/v1/wallet:
     get:
       tags: [Wallet]
@@ -631,14 +770,27 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/PageCursor' }
         - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/To' }
       responses:
         '200': { $ref: '#/components/responses/OperationPageResponse' }
 
+  # ================= Операции / траты / отмены =================
+  /api/v1/operations/{operationId}:
+    get:
+      tags: [Operations]
+      operationId: getOperation
+      summary: "Чтение операции по идентификатору/`Location` (B24/B28). Область: сотрудник — свои; admin — компании; владелец — своей кампании."
+      parameters:
+        - { $ref: '#/components/parameters/OperationId' }
+      responses:
+        '200': { $ref: '#/components/responses/OperationOK' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/v1/spends:
     post:
-      tags: [Wallet]
+      tags: [Operations]
       operationId: createSpend
-      summary: Трата из кошелька (сотрудник, B23)
+      summary: Трата сотрудника из своего кошелька (B23). Бизнес-номер источника обязателен.
       parameters:
         - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
@@ -650,11 +802,27 @@ paths:
         '201': { $ref: '#/components/responses/OperationOutcome' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/manual-accruals:
+    post:
+      tags: [Operations]
+      operationId: createManualAccrual
+      summary: Ручное начисление одного ресурса активному участнику кампании (владелец своей кампании / admin; B21). Бизнес-номер источника обязателен.
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ManualAccrualRequest' }
+      responses:
+        '201': { $ref: '#/components/responses/OperationOutcome' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/accrual-cancellations:
     post:
       tags: [Cancellations]
       operationId: cancelAccrual
-      summary: Отмена начисления/пакета награды (admin; владелец своей кампании при активном получателе, RA4; B26)
+      summary: Отмена начисления/пакета награды (admin; владелец своей кампании при активном получателе; RA4 — только admin при заблокированном). B26.
       parameters:
         - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
@@ -670,7 +838,7 @@ paths:
     post:
       tags: [Cancellations]
       operationId: refundSpend
-      summary: Возврат по трате (admin; та же система покупок с актуальным grant; B27)
+      summary: Возврат по трате (admin; та же система покупок с актуальным grant; B27). Причина обязательна.
       parameters:
         - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
@@ -683,6 +851,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  # ================= Экспорт =================
   /api/v1/statements:
     post:
       tags: [Statements]
@@ -711,13 +880,12 @@ paths:
     get:
       tags: [Statements]
       operationId: getStatement
-      summary: Состояние выписки (заказчик, B36)
+      summary: Состояние выписки (заказчик, B36); state=deleted для удалённой
       parameters:
         - { $ref: '#/components/parameters/StatementId' }
       responses:
         '200': { $ref: '#/components/responses/StatementOK' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '410': { $ref: '#/components/responses/Gone' }
     delete:
       tags: [Statements]
       operationId: deleteStatement
@@ -731,15 +899,15 @@ paths:
     post:
       tags: [Statements]
       operationId: createDownloadLink
-      summary: Выдать ссылку на готовую выписку (заказчик; срок <=60с, T05)
+      summary: Выдать ссылку на готовую выписку (заказчик; срок <=60с, T05). Удалённая — 409 после проверки доступа.
       parameters:
         - { $ref: '#/components/parameters/StatementId' }
         - { $ref: '#/components/parameters/IdempotencyKey' }
       responses:
         '201': { $ref: '#/components/responses/DownloadLinkCreated' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '410': { $ref: '#/components/responses/Gone' }
 
+  # ================= Аудит (admin) =================
   /api/v1/audit:
     get:
       tags: [Audit]
@@ -748,15 +916,18 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/PageCursor' }
         - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/To' }
       responses:
         '200': { $ref: '#/components/responses/AuditPageResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  # ================= Интеграции (internal, service) =================
   /internal/v1/events:
     post:
       tags: [Integration]
       operationId: transmitProgress
-      summary: Передать прогресс (интеграция с grant progress; B14)
+      summary: Передать прогресс (сервис с grant progress; B14). business номер = sourceEventNo (B16).
       requestBody:
         required: true
         content:
@@ -766,11 +937,60 @@ paths:
         '201': { $ref: '#/components/responses/EventResult' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /internal/v1/spends:
+    post:
+      tags: [Integration]
+      operationId: integrationSpend
+      summary: Списание ресурса указанного сотрудника (сервис с grant spend; B23). Бизнес-номер источника обязателен.
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InternalSpendRequest' }
+      responses:
+        '201': { $ref: '#/components/responses/OperationOutcome' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /internal/v1/manual-accruals:
+    post:
+      tags: [Integration]
+      operationId: integrationManualAccrual
+      summary: Ручное начисление участнику (сервис с grant accrual; B21). Бизнес-номер источника обязателен.
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InternalManualAccrualRequest' }
+      responses:
+        '201': { $ref: '#/components/responses/OperationOutcome' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /internal/v1/spends/{operationId}/refund:
+    post:
+      tags: [Integration]
+      operationId: integrationRefund
+      summary: Возврат по своей трате (та же система покупок + актуальный grant; B27). Причина обязательна.
+      parameters:
+        - { $ref: '#/components/parameters/OperationId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InternalRefundRequest' }
+      responses:
+        '201': { $ref: '#/components/responses/OperationOutcome' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /internal/v1/operations:
     get:
       tags: [Integration]
       operationId: listIntegrationOperations
-      summary: Только своя история операций (интеграция; B04c)
+      summary: Только своя история операций (сервис; B04c)
       parameters:
         - { $ref: '#/components/parameters/PageCursor' }
         - { $ref: '#/components/parameters/PageSize' }
@@ -787,6 +1007,7 @@ components:
   parameters:
     EmployeeId: { name: employeeId, in: path, required: true, schema: { type: integer, format: int64 } }
     EmployeeIdOptional: { name: employeeId, in: query, required: false, schema: { type: integer, format: int64 } }
+    TaskIdOptional: { name: taskId, in: query, required: false, schema: { type: integer, format: int64 } }
     ResourceId: { name: resourceId, in: path, required: true, schema: { type: integer, format: int64 } }
     CampaignId: { name: campaignId, in: path, required: true, schema: { type: integer, format: int64 } }
     StreamId: { name: streamId, in: path, required: true, schema: { type: integer, format: int64 } }
@@ -797,7 +1018,10 @@ components:
     IntegrationId: { name: integrationId, in: path, required: true, schema: { type: integer, format: int64 } }
     PurchaseSystemId: { name: purchaseSystemId, in: path, required: true, schema: { type: integer, format: int64 } }
     StatementId: { name: statementId, in: path, required: true, schema: { type: integer, format: int64 } }
+    OperationId: { name: operationId, in: path, required: true, schema: { type: integer, format: int64 } }
     Season: { name: season, in: query, required: false, schema: { type: integer } }
+    CampaignScope: { name: scope, in: query, required: false, schema: { type: string, enum: [available, mine, all] }, description: "available — опубликованные текущего сезона (сотрудник); mine — мои (владелец); all — компании (admin)" }
+    Period: { name: period, in: query, required: false, schema: { type: string, enum: [day, month, quarter, halfyear, year] } }
     PageCursor: { name: cursor, in: query, required: false, schema: { type: string } }
     PageSize: { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
     ResourceFilter: { name: resource, in: query, required: false, schema: { type: integer, format: int64 } }
@@ -813,6 +1037,10 @@ components:
       name: Idempotency-Key
       in: header
       required: true
+      description: >
+        Для экономических операций (spend, manual-accrual, budget-allocation, cancellation, refund, event) — бессрочный
+        бизнес-номер источника (B24/B16): область (company, initiator_key, kind, номер). Для создания настроек —
+        транспортный ключ дедупликации >=24ч.
       schema: { type: string, maxLength: 100 }
   responses:
     BadRequest:
@@ -840,6 +1068,13 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
+    ServiceUnavailable:
+      description: Временная недоступность (503); заголовок Retry-After
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     PreconditionFailed:
       description: Устаревший ETag (412)
       content:
@@ -851,235 +1086,353 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     Gone:
-      description: Выписка удалена (410)
+      description: Ресурс удалён (410)
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
-    EmployeeOK:
+
+    # ---- 200 OK с ETag (изменяемые) ----
+    EmployeeOK: { $ref: '#/components/responses/_OKEmployee' }
+    ResourceOK: { $ref: '#/components/responses/_OKResource' }
+    CampaignOK: { $ref: '#/components/responses/_OKCampaign' }
+    StreamOK: { $ref: '#/components/responses/_OKStream' }
+    TaskOK: { $ref: '#/components/responses/_OKTask' }
+    MilestoneOK: { $ref: '#/components/responses/_OKMilestone' }
+    ChallengeOK: { $ref: '#/components/responses/_OKChallenge' }
+    AchievementOK: { $ref: '#/components/responses/_OKAchievement' }
+    PurchaseSystemOK: { $ref: '#/components/responses/_OKPurchaseSystem' }
+    OperationOK: { $ref: '#/components/responses/_OKOperation' }
+    StatementOK: { $ref: '#/components/responses/_OKStatement' }
+    WalletOK: { $ref: '#/components/responses/_OKWallet' }
+    LeaderboardOK: { $ref: '#/components/responses/_OKLeaderboard' }
+    OwnRatingOK: { $ref: '#/components/responses/_OKOwnRating' }
+    StreamScoreOK: { $ref: '#/components/responses/_OKStreamScore' }
+    RewardOK: { $ref: '#/components/responses/_OKReward' }
+    ExpensesResponse: { $ref: '#/components/responses/_OKExpenses' }
+    ResourceIdListOK: { $ref: '#/components/responses/_OKResourceIdList' }
+    _OKEmployee:
       description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Employee' }
-    EmployeeCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Employee' }
-    ResourceOK:
+    _OKResource:
       description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Resource' }
-    ResourceCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Resource' }
-    CampaignOK:
+    _OKCampaign:
       description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Campaign' }
-    CampaignCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Campaign' }
-    StreamOK:
+    _OKStream:
       description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Stream' }
-    StreamCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Stream' }
-    TaskOK:
+    _OKTask:
       description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Task' }
-    TaskCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Task' }
-    MilestoneOK:
+    _OKMilestone:
       description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Milestone' }
-    MilestoneCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Milestone' }
-    ChallengeOK:
+    _OKChallenge:
       description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Challenge' }
-    ChallengeCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Challenge' }
-    AchievementOK:
+    _OKAchievement:
       description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Achievement' }
-    AchievementCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
+    _OKPurchaseSystem:
+      description: OK
+      headers: { ETag: { schema: { type: string } } }
       content:
         application/json:
-          schema: { $ref: '#/components/schemas/Achievement' }
-    PurchaseSystemOK:
+          schema: { $ref: '#/components/schemas/PurchaseSystem' }
+    _OKOperation:
       description: OK
       content:
         application/json:
-          schema: { $ref: '#/components/schemas/PurchaseSystem' }
-    PurchaseSystemCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/PurchaseSystem' }
-    StatementOK:
+          schema: { $ref: '#/components/schemas/Operation' }
+    _OKStatement:
       description: OK
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Statement' }
-    StatementCreated:
-      description: Created
-      headers:
-        Location: { schema: { type: string } }
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/Statement' }
-    WalletOK:
+    _OKWallet:
       description: OK
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Wallet' }
-    OperationOutcome:
-      description: Экономическая операция принята (posted или declined)
-      headers:
-        Location: { schema: { type: string } }
+    _OKLeaderboard:
+      description: OK
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Leaderboard' }
+    _OKOwnRating:
+      description: OK
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/OwnRating' }
+    _OKStreamScore:
+      description: OK
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/StreamScoreView' }
+    _OKReward:
+      description: OK
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/RewardView' }
+    _OKExpenses:
+      description: OK
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ExpensesView' }
+    _OKResourceIdList:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: array
+            items: { type: integer, format: int64 }
+
+    # ---- 201 Created с Location ----
+    EmployeeCreated: { $ref: '#/components/responses/_CreatedEmployee' }
+    IntegrationCreated: { $ref: '#/components/responses/_CreatedIntegration' }
+    ResourceCreated: { $ref: '#/components/responses/_CreatedResource' }
+    CampaignCreated: { $ref: '#/components/responses/_CreatedCampaign' }
+    StreamCreated: { $ref: '#/components/responses/_CreatedStream' }
+    TaskCreated: { $ref: '#/components/responses/_CreatedTask' }
+    MilestoneCreated: { $ref: '#/components/responses/_CreatedMilestone' }
+    ChallengeCreated: { $ref: '#/components/responses/_CreatedChallenge' }
+    AchievementCreated: { $ref: '#/components/responses/_CreatedAchievement' }
+    PurchaseSystemCreated: { $ref: '#/components/responses/_CreatedPurchaseSystem' }
+    StatementCreated: { $ref: '#/components/responses/_CreatedStatement' }
+    OperationOutcome: { $ref: '#/components/responses/_CreatedOutcome' }
+    DownloadLinkCreated: { $ref: '#/components/responses/_CreatedDownloadLink' }
+    EventResult: { $ref: '#/components/responses/_CreatedEvent' }
+    _CreatedEmployee:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Employee' }
+    _CreatedIntegration:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Integration' }
+    _CreatedResource:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Resource' }
+    _CreatedCampaign:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Campaign' }
+    _CreatedStream:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Stream' }
+    _CreatedTask:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Task' }
+    _CreatedMilestone:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Milestone' }
+    _CreatedChallenge:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Challenge' }
+    _CreatedAchievement:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Achievement' }
+    _CreatedPurchaseSystem:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PurchaseSystem' }
+    _CreatedStatement:
+      description: Created
+      headers: { Location: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Statement' }
+    _CreatedOutcome:
+      description: Экономическая операция принята (posted/declined)
+      headers: { Location: { schema: { type: string } } }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/OperationOutcome' }
-    DownloadLinkCreated:
+    _CreatedDownloadLink:
       description: Created
       content:
         application/json:
           schema: { $ref: '#/components/schemas/DownloadLink' }
-    EventResult:
+    _CreatedEvent:
       description: Событие принято
       content:
         application/json:
           schema: { $ref: '#/components/schemas/EventResult' }
-    EmployeePageResponse:
-      description: Страница сотрудников
+
+    # ---- Страницы ----
+    EmployeePageResponse: { $ref: '#/components/responses/_PageEmployee' }
+    ResourcePageResponse: { $ref: '#/components/responses/_PageResource' }
+    CampaignPageResponse: { $ref: '#/components/responses/_PageCampaign' }
+    StreamPageResponse: { $ref: '#/components/responses/_PageStream' }
+    TaskPageResponse: { $ref: '#/components/responses/_PageTask' }
+    MilestonePageResponse: { $ref: '#/components/responses/_PageMilestone' }
+    ChallengePageResponse: { $ref: '#/components/responses/_PageChallenge' }
+    AchievementPageResponse: { $ref: '#/components/responses/_PageAchievement' }
+    AchievementGrantPageResponse: { $ref: '#/components/responses/_PageAchievementGrant' }
+    IntegrationPageResponse: { $ref: '#/components/responses/_PageIntegration' }
+    IntegrationGrantPageResponse: { $ref: '#/components/responses/_PageIntegrationGrant' }
+    PurchaseSystemPageResponse: { $ref: '#/components/responses/_PagePurchaseSystem' }
+    BudgetPageResponse: { $ref: '#/components/responses/_PageBudget' }
+    MovementPageResponse: { $ref: '#/components/responses/_PageMovement' }
+    OperationPageResponse: { $ref: '#/components/responses/_PageOperation' }
+    StatementPageResponse: { $ref: '#/components/responses/_PageStatement' }
+    AuditPageResponse: { $ref: '#/components/responses/_PageAudit' }
+    ProgressPageResponse: { $ref: '#/components/responses/_PageProgress' }
+    CatalogResponse: { $ref: '#/components/responses/_PageCatalog' }
+    CampaignResultsResponse: { $ref: '#/components/responses/_PageResult' }
+    _PageEmployee:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/EmployeePage' }
-    ResourcePageResponse:
-      description: Страница ресурсов
+    _PageResource:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ResourcePage' }
-    CampaignPageResponse:
-      description: Страница кампаний
+    _PageCampaign:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/CampaignPage' }
-    StreamPageResponse:
-      description: Страница стримов
+    _PageStream:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/StreamPage' }
-    TaskPageResponse:
-      description: Страница заданий
+    _PageTask:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/TaskPage' }
-    ChallengePageResponse:
-      description: Страница челленджей
+    _PageMilestone:
+      description: Страница
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/MilestonePage' }
+    _PageChallenge:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ChallengePage' }
-    AchievementPageResponse:
-      description: Страница определений достижений
+    _PageAchievement:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/AchievementPage' }
-    AchievementGrantPageResponse:
-      description: Страница выдач достижений
+    _PageAchievementGrant:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/AchievementGrantPage' }
-    IntegrationPageResponse:
-      description: Страница интеграций
+    _PageIntegration:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/IntegrationPage' }
-    PurchaseSystemPageResponse:
-      description: Страница систем покупок
+    _PageIntegrationGrant:
+      description: Страница
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/IntegrationGrantPage' }
+    _PagePurchaseSystem:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/PurchaseSystemPage' }
-    MovementPageResponse:
-      description: Страница движений
+    _PageBudget:
+      description: Страница
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/BudgetPage' }
+    _PageMovement:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/MovementPage' }
-    OperationPageResponse:
-      description: Страница операций
+    _PageOperation:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/OperationPage' }
-    StatementPageResponse:
-      description: Страница выписок
+    _PageStatement:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/StatementPage' }
-    AuditPageResponse:
-      description: Страница аудита
+    _PageAudit:
+      description: Страница
       content:
         application/json:
           schema: { $ref: '#/components/schemas/AuditPage' }
+    _PageProgress:
+      description: Страница
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ProgressPage' }
+    _PageCatalog:
+      description: Страница
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/CatalogPage' }
+    _PageResult:
+      description: Страница
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ResultPage' }
   schemas:
-    Problem:
-      type: object
-      required: [status, title, detail, code, traceId]
-      properties:
-        status: { type: integer, example: 409 }
-        title: { type: string }
-        detail: { type: string }
-        code:
-          type: string
-          enum: [validation_error, not_found, forbidden, conflict, precondition_failed, precondition_required, gone, unprocessable, internal]
-        traceId: { type: string }
-        instance: { type: string, nullable: true }
+    # ---------- Типизированные страницы ----------
     EmployeePage:
       type: object
       required: [items, nextCursor]
@@ -1110,6 +1463,12 @@ components:
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/Task' } }
         nextCursor: { type: string, nullable: true }
+    MilestonePage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Milestone' } }
+        nextCursor: { type: string, nullable: true }
     ChallengePage:
       type: object
       required: [items, nextCursor]
@@ -1134,11 +1493,23 @@ components:
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/Integration' } }
         nextCursor: { type: string, nullable: true }
+    IntegrationGrantPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/IntegrationGrant' } }
+        nextCursor: { type: string, nullable: true }
     PurchaseSystemPage:
       type: object
       required: [items, nextCursor]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/PurchaseSystem' } }
+        nextCursor: { type: string, nullable: true }
+    BudgetPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Budget' } }
         nextCursor: { type: string, nullable: true }
     MovementPage:
       type: object
@@ -1164,44 +1535,113 @@ components:
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/AuditEntry' } }
         nextCursor: { type: string, nullable: true }
+    ProgressPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ProgressView' } }
+        nextCursor: { type: string, nullable: true }
+    CatalogPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CatalogItem' } }
+        nextCursor: { type: string, nullable: true }
+    ResultPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ResultRow' } }
+        nextCursor: { type: string, nullable: true }
+    # ---------- Проблема ----------
+    Problem:
+      type: object
+      required: [status, title, detail, code, traceId]
+      properties:
+        status: { type: integer, example: 409 }
+        title: { type: string }
+        detail: { type: string }
+        code:
+          type: string
+          enum: [validation_error, not_found, forbidden, conflict, precondition_failed, precondition_required, gone, insufficient_funds, resource_unavailable, service_unavailable, internal]
+        traceId: { type: string }
+        instance: { type: string, nullable: true }
+    # ---------- Сотрудники ----------
     Employee:
       type: object
       required: [id, masterId, isActive]
       properties:
         id: { type: integer, format: int64 }
-        masterId: { type: integer, minimum: 1 }
+        masterId: { type: integer, minimum: 1, maximum: 2147483647 }
         isActive: { type: boolean }
         tags: { type: array, items: { type: string, pattern: '^[a-z0-9-]{1,32}$' } }
+        etag: { type: string }
     EmployeeCreate:
       type: object
       required: [masterId, tags]
       properties:
-        masterId: { type: integer, minimum: 1 }
+        masterId: { type: integer, minimum: 1, maximum: 2147483647 }
         tags: { type: array, items: { type: string, pattern: '^[a-z0-9-]{1,32}$' } }
     EmployeePatch:
       type: object
       properties:
         tags: { type: array, items: { type: string, pattern: '^[a-z0-9-]{1,32}$' } }
         isActive: { type: boolean }
+    # ---------- Интеграции ----------
+    Integration:
+      type: object
+      required: [id, name, serviceSub, companyId]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string, maxLength: 200 }
+        serviceSub: { type: string, description: проверенный sub сервиса (actorType=service) }
+        companyId: { type: string, format: uuid }
+    IntegrationCreate:
+      type: object
+      required: [name, serviceSub]
+      properties:
+        name: { type: string, maxLength: 200 }
+        serviceSub: { type: string, maxLength: 200 }
+    IntegrationGrant:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [progress, accrual, spend] }
+        campaignId: { type: integer, format: int64, nullable: true }
+        resourceId: { type: integer, format: int64, nullable: true }
+        purchaseSystemId: { type: integer, format: int64, nullable: true }
+      description: >
+        Сочетания полей по kind: progress — campaignId обязателен, resourceId/purchaseSystemId недопустимы;
+        accrual — campaignId и resourceId обязательны, purchaseSystemId недопустим;
+        spend — purchaseSystemId и resourceId обязательны, campaignId недопустим.
+        Отсутствие области не означает wildcard.
+    IntegrationGrantList:
+      type: object
+      required: [grants]
+      properties:
+        grants: { type: array, items: { $ref: '#/components/schemas/IntegrationGrant' } }
+    # ---------- Ресурсы ----------
     Resource:
       type: object
       required: [id, code, name, status]
       properties:
         id: { type: integer, format: int64 }
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         status: { type: string, enum: [active, archived] }
+        etag: { type: string }
     ResourceCreate:
       type: object
       required: [code, name]
       properties:
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
     ResourcePatch:
       type: object
       properties:
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         status: { type: string, enum: [active, archived] }
+    # ---------- Кампании ----------
     Audience:
       type: object
       properties:
@@ -1210,11 +1650,11 @@ components:
         none: { type: array, items: { type: string, pattern: '^[a-z0-9-]{1,32}$' } }
     Campaign:
       type: object
-      required: [id, code, name, season, start, end, state, resources]
+      required: [id, code, name, season, start, end, state]
       properties:
         id: { type: integer, format: int64 }
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
         season: { type: integer }
         start: { type: string, format: date-time }
@@ -1222,30 +1662,44 @@ components:
         state: { type: string, enum: [draft, published, archived] }
         ownerEmployeeId: { type: integer, format: int64 }
         audience: { $ref: '#/components/schemas/Audience' }
-        resources: { type: array, items: { type: integer, format: int64 } }
+        resources: { type: array, items: { $ref: '#/components/schemas/CampaignResource' } }
         etag: { type: string }
+    CampaignResource:
+      type: object
+      required: [resourceId]
+      properties:
+        resourceId: { type: integer, format: int64 }
+        allocationRequested: { type: boolean, description: "запрос на выделение бюджета по ресурсу (admin подтверждает отдельной операцией)" }
     CampaignCreate:
       type: object
       required: [code, name, season, start, end, audience]
       properties:
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
         season: { type: integer }
         start: { type: string, format: date-time }
         end: { type: string, format: date-time }
-        ownerEmployeeId: { type: integer, format: int64 }
         audience: { $ref: '#/components/schemas/Audience' }
-        resources: { type: array, items: { type: integer, format: int64 } }
+        resources: { type: array, items: { $ref: '#/components/schemas/CampaignResource' } }
     CampaignPatch:
       type: object
-      description: "Изменяемые после публикации: name/description/audience/owner. status — переход draft/published/archived."
+      description: >
+        До публикации (draft): code/name/description/season/start/end/audience/resources/ownerEmployeeId.
+        После публикации: только name/description/audience (B09f). Сезон/сроки/ресурсы после публикации — 409.
+        status — переход draft/published/archived. ownerEmployeeId только admin (B03).
       properties:
-        name: { type: string, maxLength: 200 }
+        code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
+        name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
+        season: { type: integer }
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
         audience: { $ref: '#/components/schemas/Audience' }
-        ownerEmployeeId: { type: integer, format: int64 }
+        resources: { type: array, items: { $ref: '#/components/schemas/CampaignResource' } }
+        ownerEmployeeId: { type: integer, format: int64, nullable: true }
         status: { type: string, enum: [published, archived] }
+    # ---------- Стримы / Задания / Вехи ----------
     Stream:
       type: object
       required: [id, code, name, campaignId, status]
@@ -1253,7 +1707,7 @@ components:
         id: { type: integer, format: int64 }
         campaignId: { type: integer, format: int64 }
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         audience: { $ref: '#/components/schemas/Audience' }
         status: { type: string, enum: [active, archived] }
         etag: { type: string }
@@ -1262,12 +1716,19 @@ components:
       required: [code, name]
       properties:
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
     StreamPatch:
       type: object
       properties:
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        audience: { $ref: '#/components/schemas/Audience' }
         status: { type: string, enum: [archived] }
+    RewardLine:
+      type: object
+      required: [resourceId, amount]
+      properties:
+        resourceId: { type: integer, format: int64 }
+        amount: { type: integer, minimum: 1, maximum: 1000000000 }
     Task:
       type: object
       required: [id, code, name, streamId, goal, periodicity, streamPoints]
@@ -1275,7 +1736,7 @@ components:
         id: { type: integer, format: int64 }
         streamId: { type: integer, format: int64 }
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
         goal: { type: integer, minimum: 1, maximum: 1000000000 }
         periodicity: { type: string, enum: [day, month, quarter, halfyear, year] }
@@ -1284,18 +1745,12 @@ components:
         rewards: { type: array, items: { $ref: '#/components/schemas/RewardLine' } }
         status: { type: string, enum: [active, archived] }
         etag: { type: string }
-    RewardLine:
-      type: object
-      required: [resourceId, amount]
-      properties:
-        resourceId: { type: integer, format: int64 }
-        amount: { type: integer, minimum: 1, maximum: 1000000000 }
     TaskCreate:
       type: object
       required: [code, name, goal, periodicity, streamPoints]
       properties:
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
         goal: { type: integer, minimum: 1, maximum: 1000000000 }
         periodicity: { type: string, enum: [day, month, quarter, halfyear, year] }
@@ -1304,8 +1759,17 @@ components:
         rewards: { type: array, items: { $ref: '#/components/schemas/RewardLine' } }
     TaskPatch:
       type: object
-      description: До публикации изменяемо всё; после — только status (архив)
+      description: >
+        До публикации изменяемо: name/description/goal/periodicity/streamPoints/audience/rewards.
+        После публикации — только status (архив). Иные изменения после публикации — 409.
       properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+        goal: { type: integer, minimum: 1, maximum: 1000000000 }
+        periodicity: { type: string, enum: [day, month, quarter, halfyear, year] }
+        streamPoints: { type: integer, minimum: 0, maximum: 1000000000 }
+        audience: { $ref: '#/components/schemas/Audience' }
+        rewards: { type: array, items: { $ref: '#/components/schemas/RewardLine' } }
         status: { type: string, enum: [archived] }
     Milestone:
       type: object
@@ -1322,6 +1786,12 @@ components:
       properties:
         threshold: { type: integer, minimum: 1, maximum: 1000000000 }
         achievementId: { type: integer, format: int64 }
+    MilestonePatch:
+      type: object
+      properties:
+        threshold: { type: integer, minimum: 1, maximum: 1000000000 }
+        achievementId: { type: integer, format: int64 }
+    # ---------- Челленджи / Рейтинг ----------
     Challenge:
       type: object
       required: [id, streamId, start, end, state]
@@ -1341,26 +1811,34 @@ components:
         end: { type: string, format: date-time }
     Leaderboard:
       type: object
-      required: [limit, top, own, asOf]
+      required: [limit, top, asOf]
       properties:
         limit: { type: integer, maximum: 100 }
         top: { type: array, items: { $ref: '#/components/schemas/RatingRow' } }
-        own: { $ref: '#/components/schemas/RatingRow' }
         asOf: { type: string, format: date-time }
     RatingRow:
       type: object
       required: [masterId, score, place]
       properties:
         masterId: { type: integer }
-        score: { type: integer, minimum: 0 }
+        score: { type: integer, format: int64, minimum: 0 }
         place: { type: integer, minimum: 1 }
+    OwnRating:
+      type: object
+      required: [present]
+      properties:
+        present: { type: boolean, description: "false — у читателя нет события в интервале, места нет" }
+        masterId: { type: integer, nullable: true }
+        score: { type: integer, format: int64, nullable: true }
+        place: { type: integer, minimum: 1, nullable: true }
+    # ---------- Достижения ----------
     Achievement:
       type: object
       required: [id, code, name]
       properties:
         id: { type: integer, format: int64 }
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
         etag: { type: string }
     AchievementCreate:
@@ -1368,12 +1846,12 @@ components:
       required: [code, name]
       properties:
         code: { type: string, pattern: '^[A-Za-z0-9_-]{1,40}$' }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
     AchievementPatch:
       type: object
       properties:
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
     AchievementGrant:
       type: object
@@ -1383,50 +1861,105 @@ components:
         achievementId: { type: integer, format: int64 }
         season: { type: integer }
         grantedAt: { type: string, format: date-time }
+    # ---------- Бюджеты ----------
     Budget:
       type: object
       required: [campaignId, resourceId, remaining]
       properties:
         campaignId: { type: integer, format: int64 }
         resourceId: { type: integer, format: int64 }
-        remaining: { type: integer, format: int64, minimum: 0 }
+        remaining: { type: integer, format: int64, minimum: 0, maximum: 1000000000000000 }
     BudgetAllocationRequest:
       type: object
       required: [resourceId, amount]
       properties:
         resourceId: { type: integer, format: int64 }
         amount: { type: integer, minimum: 1, maximum: 1000000000 }
-    Integration:
-      type: object
-      required: [id, name]
-      properties:
-        id: { type: integer, format: int64 }
-        name: { type: string, maxLength: 200 }
-    IntegrationGrant:
-      type: object
-      required: [kind]
-      properties:
-        kind: { type: string, enum: [progress, accrual, spend] }
-        campaignId: { type: integer, format: int64 }
-        resourceId: { type: integer, format: int64 }
-        purchaseSystemId: { type: integer, format: int64 }
+    # ---------- Системы покупок ----------
     PurchaseSystem:
       type: object
       required: [id, name]
       properties:
         id: { type: integer, format: int64 }
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
         resources: { type: array, items: { type: integer, format: int64 } }
         etag: { type: string }
     PurchaseSystemCreate:
       type: object
       required: [name]
       properties:
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
     PurchaseSystemPatch:
       type: object
       properties:
-        name: { type: string, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
+    # ---------- Личные чтения ----------
+    CatalogItem:
+      type: object
+      required: [campaignId, code, name, asOf]
+      properties:
+        campaignId: { type: integer, format: int64 }
+        code: { type: string }
+        name: { type: string }
+        asOf: { type: string, format: date-time, description: "момент заполнения кеша каталога (T06/T09)" }
+        tasks:
+          type: array
+          items: { $ref: '#/components/schemas/CatalogTask' }
+    CatalogTask:
+      type: object
+      required: [taskId, code, name, goal]
+      properties:
+        taskId: { type: integer, format: int64 }
+        code: { type: string }
+        name: { type: string }
+        goal: { type: integer }
+    ProgressView:
+      type: object
+      required: [taskId, period, value, goal, completed]
+      properties:
+        taskId: { type: integer, format: int64 }
+        period: { type: string }
+        value: { type: integer, minimum: 0 }
+        goal: { type: integer }
+        completed: { type: boolean }
+    StreamScoreView:
+      type: object
+      required: [streamId, season, points]
+      properties:
+        streamId: { type: integer, format: int64 }
+        season: { type: integer }
+        points: { type: integer, format: int64, minimum: 0 }
+    RewardView:
+      type: object
+      required: [taskId, result]
+      properties:
+        taskId: { type: integer, format: int64 }
+        result: { type: string, enum: [granted, declined, none] }
+        lines:
+          type: array
+          items: { $ref: '#/components/schemas/RewardLine' }
+        rejectReason: { type: string, nullable: true }
+    ResultRow:
+      type: object
+      required: [masterId]
+      properties:
+        masterId: { type: integer }
+        completedTasks: { type: integer }
+        streamPoints: { type: integer, format: int64 }
+    ExpensesView:
+      type: object
+      required: [byResource]
+      properties:
+        byResource:
+          type: array
+          items:
+            type: object
+            required: [resourceId, spent, budgetRemaining]
+            properties:
+              resourceId: { type: integer, format: int64 }
+              spent: { type: integer, format: int64 }
+              budgetRemaining: { type: integer, format: int64 }
+    # ---------- Кошелёк / операции ----------
     Wallet:
       type: object
       required: [employeeId, balances]
@@ -1439,7 +1972,7 @@ components:
       properties:
         resourceId: { type: integer, format: int64 }
         code: { type: string }
-        balance: { type: integer, format: int64, minimum: 0 }
+        balance: { type: integer, format: int64, minimum: 0, maximum: 1000000000000000 }
     Movement:
       type: object
       required: [id, operationId, resourceId, delta, balanceAfter, occurredAt, kind]
@@ -1455,11 +1988,13 @@ components:
         originalOperationId: { type: integer, format: int64, nullable: true }
     Operation:
       type: object
-      required: [id, kind, result, occurredAt]
+      required: [id, kind, initiatorKey, result, occurredAt]
       properties:
         id: { type: integer, format: int64 }
         kind: { type: string, enum: [budget_allocation, manual_accrual, task_reward, spend, accrual_cancellation, spend_refund] }
-        initiator: { type: string }
+        initiatorKey: { type: string, description: "инициатор: 'user:{id}' либо 'service:{id}'" }
+        sourceNo: { type: string, description: "бессрочный бизнес-номер источника (B24)" }
+        basis: { type: string, nullable: true, description: "основание (обязательно для manual_accrual/accrual_cancellation/spend_refund)" }
         employeeId: { type: integer, format: int64, nullable: true }
         result: { type: string, enum: [posted, declined] }
         rejectReason: { type: string, nullable: true }
@@ -1483,22 +2018,57 @@ components:
         rejectReason: { type: string, nullable: true }
     SpendRequest:
       type: object
-      required: [resourceId, amount, purchaseSystemId]
+      required: [resourceId, amount, purchaseSystemId, basis]
       properties:
         resourceId: { type: integer, format: int64 }
         amount: { type: integer, minimum: 1, maximum: 1000000000 }
         purchaseSystemId: { type: integer, format: int64 }
+        basis: { type: string, minLength: 1, maxLength: 2000 }
+    ManualAccrualRequest:
+      type: object
+      required: [campaignId, employeeId, resourceId, amount, basis]
+      properties:
+        campaignId: { type: integer, format: int64 }
+        employeeId: { type: integer, format: int64 }
+        resourceId: { type: integer, format: int64 }
+        amount: { type: integer, minimum: 1, maximum: 1000000000 }
+        basis: { type: string, minLength: 1, maxLength: 2000 }
+    InternalSpendRequest:
+      type: object
+      required: [employeeId, resourceId, amount, purchaseSystemId, basis]
+      properties:
+        employeeId: { type: integer, format: int64, description: "получатель списания (указанный сотрудник)" }
+        resourceId: { type: integer, format: int64 }
+        amount: { type: integer, minimum: 1, maximum: 1000000000 }
+        purchaseSystemId: { type: integer, format: int64 }
+        basis: { type: string, minLength: 1, maxLength: 2000 }
+    InternalManualAccrualRequest:
+      type: object
+      required: [campaignId, employeeId, resourceId, amount, basis]
+      properties:
+        campaignId: { type: integer, format: int64 }
+        employeeId: { type: integer, format: int64 }
+        resourceId: { type: integer, format: int64 }
+        amount: { type: integer, minimum: 1, maximum: 1000000000 }
+        basis: { type: string, minLength: 1, maxLength: 2000 }
     AccrualCancellationRequest:
       type: object
-      required: [originalOperationId, reason]
+      required: [originalOperationId, basis]
       properties:
         originalOperationId: { type: integer, format: int64 }
-        reason: { type: string, maxLength: 2000 }
+        basis: { type: string, minLength: 1, maxLength: 2000 }
     SpendRefundRequest:
       type: object
-      required: [originalOperationId]
+      required: [originalOperationId, basis]
       properties:
         originalOperationId: { type: integer, format: int64 }
+        basis: { type: string, minLength: 1, maxLength: 2000 }
+    InternalRefundRequest:
+      type: object
+      required: [basis]
+      properties:
+        basis: { type: string, minLength: 1, maxLength: 2000 }
+    # ---------- Выписки ----------
     Statement:
       type: object
       required: [id, state]
@@ -1524,6 +2094,7 @@ components:
       properties:
         url: { type: string }
         expiresAt: { type: string, format: date-time }
+    # ---------- Аудит ----------
     AuditEntry:
       type: object
       required: [id, actor, target, action, occurredAt]
@@ -1531,9 +2102,14 @@ components:
         id: { type: integer, format: int64 }
         actor: { type: string }
         target: { type: string }
-        action: { type: string }
-        payload: { type: object, additionalProperties: true }
+        action: { type: string, enum: [rights_change, settings_change, budget_allocation, owner_change, permission_change, correction] }
         occurredAt: { type: string, format: date-time }
+        details:
+          type: object
+          description: "Структурированные поля изменения (например {field, from, to}); не свободный JSON произвольной формы."
+          additionalProperties:
+            type: string
+    # ---------- События (интеграция) ----------
     ProgressEventRequest:
       type: object
       required: [employeeId, taskId, increase, sourceEventNo]
@@ -1541,7 +2117,7 @@ components:
         employeeId: { type: integer, format: int64 }
         taskId: { type: integer, format: int64 }
         increase: { type: integer, minimum: 1, maximum: 1000000000 }
-        sourceEventNo: { type: string, maxLength: 100, description: "бизнес-номер (B16)" }
+        sourceEventNo: { type: string, maxLength: 100, description: "бессрочный бизнес-номер события (B16)" }
     EventResult:
       type: object
       required: [accepted, creditedIncrease]
