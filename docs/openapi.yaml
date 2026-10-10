@@ -1383,7 +1383,13 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/IntegrationPage' }
     _PageIntegrationGrant:
-      description: Страница
+      description: >
+        Страница разрешений интеграции. Ответы чтения (GET) и успешного изменения (PUT 200)
+        содержат сильный ETag текущего набора grants (I201), включая пустой набор.
+      headers:
+        ETag:
+          description: Strong ETag текущего набора grants (I201); обязателен для If-Match в replaceIntegrationGrants. Выдаётся и для пустого набора.
+          schema: { type: string }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/IntegrationGrantPage' }
@@ -1904,7 +1910,7 @@ components:
         campaignId: { type: integer, format: int64 }
         code: { type: string }
         name: { type: string }
-        asOf: { type: string, format: date-time, description: "момент заполнения кеша каталога (T06/T09)" }
+        asOf: { type: string, format: date-time, description: "момент, зафиксированный перед началом чтения данных из БД; не обновляется при записи в кеш; срок свежести не отсчитывается заново после позднего заполнения (stage-2 §6.1, I202)" }
         tasks:
           type: array
           items: { $ref: '#/components/schemas/CatalogTask' }
