@@ -124,7 +124,7 @@ public sealed record LeaderboardView(int Limit, List<RatingRowView> Top, DateTim
 public sealed record RatingRowView(int MasterId, long Score, int Place);
 public sealed record OwnRatingView(bool Present, int? MasterId, long? Score, int? Place);
 
-public sealed class StatementUseCases(IUnitOfWork db, ICurrentActor current, ITime time, IObjectStorage storage, ICache cache)
+public sealed class StatementUseCases(IUnitOfWork db, ICurrentActor current, ITime time, IObjectStorage storage)
 {
     private Actor Require() => current.Actor ?? throw MotivaException.Forbidden("Требуется аутентификация");
 
@@ -141,9 +141,11 @@ public sealed class StatementUseCases(IUnitOfWork db, ICurrentActor current, ITi
             throw MotivaException.Validation("Ресурс не найден");
         }
 
-        StatementScope scope; long? scopeEmployeeId = null;
+        StatementScope scope; long? scopeEmployeeId = null; long ownerActorId;
         if (actor.Type == ActorType.User)
         {
+            var ownerEmployee = await db.Set<Employee>().FirstAsync(e => e.CompanyId == actor.CompanyId && e.MasterId == actor.MasterId, ct);
+            ownerActorId = ownerEmployee.Id;
             if (actor.IsAdmin && employeeId is long eid)
             {
                 if (!await db.Set<Employee>().AnyAsync(e => e.Id == eid && e.CompanyId == actor.CompanyId, ct))
@@ -164,8 +166,7 @@ public sealed class StatementUseCases(IUnitOfWork db, ICurrentActor current, ITi
                     throw MotivaException.Forbidden("Только Admin заказывает на другого сотрудника");
                 }
 
-                var employee = await db.Set<Employee>().FirstAsync(e => e.CompanyId == actor.CompanyId && e.MasterId == actor.MasterId, ct);
-                scope = StatementScope.Employee; scopeEmployeeId = employee.Id;
+                scope = StatementScope.Employee; scopeEmployeeId = ownerEmployee.Id;
             }
         }
         else
@@ -191,7 +192,7 @@ public sealed class StatementUseCases(IUnitOfWork db, ICurrentActor current, ITi
         {
             CompanyId = actor.CompanyId,
             OwnerActorType = actor.Type.ToString().ToLower(),
-            OwnerActorId = long.Parse(actor.Subject),
+            OwnerActorId = ownerActorId,
             Scope = scope,
             EmployeeId = scopeEmployeeId,
             From = from,
@@ -209,7 +210,7 @@ public sealed class StatementUseCases(IUnitOfWork db, ICurrentActor current, ITi
         var actor = Require();
         var statement = await db.Set<Statement>().FirstOrDefaultAsync(s => s.Id == id && s.CompanyId == actor.CompanyId, ct)
             ?? throw MotivaException.NotFound("Выписка не найдена");
-        if (!CanAccess(actor, statement))
+        if (!await CanAccessAsync(actor, statement, ct))
         {
             throw MotivaException.NotFound("Выписка недоступна");
         }
@@ -221,7 +222,7 @@ public sealed class StatementUseCases(IUnitOfWork db, ICurrentActor current, ITi
     {
         var actor = Require();
         var statement = await GetAsync(id, ct);
-        if (!CanAccess(actor, statement))
+        if (!await CanAccessAsync(actor, statement, ct))
         {
             throw MotivaException.NotFound("Выписка недоступна");
         }
@@ -289,9 +290,26 @@ public sealed class StatementUseCases(IUnitOfWork db, ICurrentActor current, ITi
         return await q.OrderByDescending(s => s.Id).ToListAsync(ct);
     }
 
-    private static bool CanAccess(Actor actor, Statement s) =>
-        s.CompanyId == actor.CompanyId &&
-        (actor.IsAdmin || (actor.Type == ActorType.User && s.OwnerActorType == "user" && long.TryParse(actor.Subject, out var id) && id == s.OwnerActorId));
+    private async Task<bool> CanAccessAsync(Actor actor, Statement s, CancellationToken ct)
+    {
+        if (s.CompanyId != actor.CompanyId)
+        {
+            return false;
+        }
+
+        if (actor.IsAdmin)
+        {
+            return true;
+        }
+
+        if (actor.Type == ActorType.User && actor.MasterId is int masterId && s.OwnerActorType == "user")
+        {
+            var employee = await db.Set<Employee>().FirstOrDefaultAsync(e => e.CompanyId == actor.CompanyId && e.MasterId == masterId, ct);
+            return employee is not null && employee.Id == s.OwnerActorId;
+        }
+
+        return false;
+    }
 }
 
 public sealed record DownloadLinkView(string Url, DateTimeOffset ExpiresAt);

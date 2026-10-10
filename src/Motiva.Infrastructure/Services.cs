@@ -119,8 +119,20 @@ public sealed class MinioStorage : IObjectStorage
     public async Task<bool> ExistsAsync(string bucket, string key, CancellationToken ct = default)
     {
         var args = new Minio.DataModel.Args.StatObjectArgs().WithBucket(bucket).WithObject(key);
-        try { await _client.StatObjectAsync(args, ct); return true; }
-        catch (Minio.Exceptions.ObjectNotFoundException) { return false; }
+        try
+        {
+            await _client.StatObjectAsync(args, ct);
+            return true;
+        }
+        catch (Minio.Exceptions.ObjectNotFoundException)
+        {
+            return false;
+        }
+        catch (Minio.Exceptions.BucketNotFoundException)
+        {
+            await _client.MakeBucketAsync(new Minio.DataModel.Args.MakeBucketArgs().WithBucket(bucket), ct);
+            return false;
+        }
     }
 
     public Task<Stream> GetAsync(string bucket, string key, CancellationToken ct = default)

@@ -722,7 +722,9 @@ public sealed class EconomyUseCases(
                                 db.Update(budget);
                             }
                         }
-                        await AddWalletMovementAsync(wallet.Id, op.Id, line.ResourceId, -line.Amount, original.CampaignId, original.Id, kind, inner);
+                        // отмена начисления списывает с кошелька (возврат в бюджет); возврат списания — начисляет обратно
+                        var movementDelta = kind == OperationKind.SpendRefund ? line.Amount : -line.Amount;
+                        await AddWalletMovementAsync(wallet.Id, op.Id, line.ResourceId, movementDelta, original.CampaignId, original.Id, kind, inner);
                     }
                     original.CancellationState = CancellationState.Posted;
                     db.Update(original);
@@ -798,7 +800,6 @@ public sealed class EconomyUseCases(
     private async Task<Operation> ReplayOrRunAsync(Actor actor, OperationKind kind, string sourceNo,
         Func<object> payloadFactory, Func<Task<Operation>> run, CancellationToken ct)
     {
-        var key = (actor.CompanyId, actor.InitiatorKey, kind, sourceNo);
         var canonical = CanonicalJson(payloadFactory());
         var request = await db.Set<OperationRequest>().FirstOrDefaultAsync(r =>
             r.CompanyId == actor.CompanyId && r.InitiatorKey == actor.InitiatorKey && r.Kind == kind && r.SourceNo == sourceNo, ct);

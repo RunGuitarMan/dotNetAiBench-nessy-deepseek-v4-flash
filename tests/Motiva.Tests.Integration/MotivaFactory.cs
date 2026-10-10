@@ -50,7 +50,7 @@ public sealed class MotivaFactory : WebApplicationFactory<Program>, IAsyncLifeti
         {
             ["ConnectionStrings:Postgres"] = _pg.GetConnectionString(),
             ["ConnectionStrings:Valkey"] = _redis.GetConnectionString(),
-            ["Storage:Endpoint"] = _minio.GetConnectionString(),
+            ["Storage:Endpoint"] = $"localhost:{_minio.GetMappedPublicPort(9000)}",
             ["Storage:AccessKey"] = _minio.GetAccessKey(),
             ["Storage:SecretKey"] = _minio.GetSecretKey(),
             ["Storage:Bucket"] = "motiva",

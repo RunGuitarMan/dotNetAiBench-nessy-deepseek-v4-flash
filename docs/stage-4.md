@@ -17,11 +17,12 @@
 | B18–B21 бюджеты/выделение/ручное начисление/награда | `Economy.cs` (AllocateBudget, ManualAccrual, GrantReward) | integration (E01, недостаток→declined) |
 | B22–B28 кошелёк/списание/отмена/возврат | `Economy.cs` (Spend, CancelAccrual, RefundSpend), `WalletReads.cs`, одна успешная отмена | integration (E05, отмена+409) |
 | B29–B33 вехи/достижения/рейтинг/финализация | `Economy.cs`, `LeaderboardStatements.cs`, worker | unit+integration |
-| B34–B37 выписки (заказ/удаление/ссылка) | `LeaderboardStatements.cs`, `StatementGenerator.cs` | «не проверено» E2E (см. ниже) |
+| B34–B37 выписки (заказ/удаление/ссылка) | `LeaderboardStatements.cs`, `StatementGenerator.cs` | integration (E2E: CSV в S3, CAS Ready, ссылка) |
 | T05 числа/время/бессрочные повторы | `DomainRules.cs`, `OperationRequest` (operation), `ProgressEvent` (event) | unit |
-| T07 CSV-генератор, снимок | `Infrastructure/StatementGenerator.cs`, `CsvStatementWriter` | «не проверено» E2E |
-| T08 тесты | — | unit 21, architecture 4, integration 5 — зелёные |
-| T09 нагрузка | `load/motiva.js` (сценарий) | «не проверено» (k6 не запускался) |
+| T06 кеш каталога (write-if-asOf-newer, ≤30 с) | `ICache`/`ValkeyCache`, `MeReadUseCases` | integration (каталог через кеш) |
+| T07 CSV-генератор, снимок, CAS Ready | `Infrastructure/StatementGenerator.cs`, `CsvStatementWriter` | integration (E2E экспорт) |
+| T08 тесты | — | unit 21, architecture 4, integration 8 — зелёные |
+| T09 нагрузка | `load/motiva.js`, `load/reports/k6-smoke-summary.json` | **smoke прогон**: 12806 req, 0% ошибок, p95=4.4ms |
 | T10 поставка | `README.md`, `docker-compose.yml`, `.env.example`, `examples/requests.sh` | — |
 
 ## Команды из чистого checkout и фактические результаты
@@ -32,32 +33,33 @@
 | `dotnet build Motiva.slnx` | 0 | сборка успешна, без CS-предупреждений |
 | `dotnet test tests/Motiva.Tests.Unit` | 0 | 21/21 passed |
 | `dotnet test tests/Motiva.Tests.Architecture` | 0 | 4/4 passed |
-| `dotnet test tests/Motiva.Tests.Integration` | 0 | 5/5 passed (PG17+Valkey+MinIO) |
+| `dotnet test tests/Motiva.Tests.Integration` | 0 | 8/8 passed (PG17+Valkey+MinIO) |
 | `dotnet ef database update` (на PG17) | 0 | миграция применена; schema проверена |
-| `k6 run load/motiva.js` | — | **не проверено** (нагрузочный запуск не выполнялся) |
+| `k6 run --duration 20s load/motiva.js` (smoke) | 0 | 12806 req, 0% failed, avg 1.5ms, p95 4.4ms; отчёт `load/reports/k6-smoke-summary.json` |
 
 Интеграционные тесты сами поднимают PostgreSQL 17 / Valkey 9 / MinIO (Testcontainers), применяют миграции и
 выполняют HTTP-сценарии с подписанными JWT (E01 два ресурса, идемпотентность повтора, недостаток бюджета,
-E05 конкурентные траты, ручное начисление+отмена+одна успешная отмена).
+E05 конкурентные траты, E07 возврат списания, ручное начисление+отмена+одна успешная отмена, E12 изоляция
+компаний, E2E-экспорт выписки через S3 с CAS Ready и выдачей ссылки).
 
 ## Известные отклонения и ограничения
 
 - **Конкурентная защита** реализована изоляцией `Serializable` + retry в `IUnitOfWork.ExecuteSerializableAsync`
   и уникальными индексами; явные `SELECT ... FOR UPDATE` по единому порядку (stage-2 §4.7) не реализованы.
   Это подход, а не ослабление бизнес-правил; часть гонок покрыта тестами (E05), часть — не покрыта.
-- **Кеш каталога/leaderboard (T06)** подключён (`ICache`/`ValkeyCache` с write-if-asOf-newer), но
-  эндпоинты каталога и рейтинга читают PostgreSQL напрямую; кеширование в read-пути не задействовано.
-  Свежесть/`asOf`/fallback — не проверены на runtime.
-- **Выписки (B36/B37/T07)** — генератор и worker реализованы (снимок, CSV, S3 put-if-absent, CAS Ready,
-  cleanup), но **E2E не прогонялся**: worker не запускался вместе с API на стенде. Готовность ссылки/файла —
-  «не проверено».
+- **Кеш каталога (T06)** задействован в `getMyCatalog` (свежесть ≤ 30 с, write-if-asOf-newer, PostgreSQL fallback);
+  **кеш live-leaderboard (≤ 5 с)** не задействован — эндпоинт рейтинга читает PostgreSQL напрямую.
+- **Нагрузка T09** — выполнен **smoke-прогон** (20 с, открытая модель) против живого API на PG17/Valkey/MinIO:
+  12806 запросов, 0% ошибок, p95≈4.4 ms (отчёт `load/reports/k6-smoke-summary.json`). Полный профиль 300 с
+  на подготовленном наборе данных (10k сотрудников) не выполнялся.
 - **Челлендж/финализация** — логика реализована, гонка на границе интервала (FT-149) и публикация
   финального рейтинга в кеш — не проверены E2E.
-- **`GET /campaigns`** и **`GET /campaigns/{id}/budgets`** — заглушки (возвращают пустые страницы).
-- **Readiness/liveness**, структурированные логи и метрики (T06 §6.4) — не реализованы.
+- **Readiness/liveness** реализованы (`/health/live`, `/health/ready`); структурированные логи и метрики
+  (T06 §6.4) — не реализованы.
 - **Transport-идемпотентность** (T05, 24 ч) реализована частично (statements/download-links), матрица
   HT-220…232 не покрыта.
-- **Нагрузка (T09)** — сценарий `load/motiva.js` подготовлен, запуск и метрики **не выполнены**.
+- **E2E отказы/восстановление** (replay после рестарта, неизменяемость файла экспорта при повторном чтении) —
+  логика заложена (история в БД, put-if-absent), отдельного e2e-теста рестарта нет.
 
 Уязвимые transitive-зависимости (`System.Security.Cryptography.Xml` 9.0.0 из Minio) закрыты явной ссылкой 9.0.1;
 остаются NU1903 от test-only зависимостей Testcontainers (SSH.NET).

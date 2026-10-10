@@ -1,10 +1,13 @@
+using System.Text.Json;
 using Motiva.Application.Ports;
 using Motiva.Domain;
 
 namespace Motiva.Application.UseCases;
 
-public sealed class MeReadUseCases(IUnitOfWork db, ICurrentActor current, ICompanyCalendar calendar, ITime time)
+public sealed class MeReadUseCases(IUnitOfWork db, ICurrentActor current, ICompanyCalendar calendar, ITime time, ICache cache)
 {
+    private static readonly TimeSpan CatalogTtl = TimeSpan.FromSeconds(30); // обязательное T06
+
     private async Task<Employee> SelfAsync(Actor actor, CancellationToken ct)
     {
         if (actor.Type != ActorType.User || actor.MasterId is null)
@@ -16,44 +19,104 @@ public sealed class MeReadUseCases(IUnitOfWork db, ICurrentActor current, ICompa
             ?? throw MotivaException.NotFound("Профиль не найден");
     }
 
-    /// <summary>Каталог доступных опубликованных кампаний текущего сезона (B11/B34).</summary>
+    /// <summary>
+    /// Каталог доступных опубликованных кампаний текущего сезона (B11/B34).
+    /// T06/D209: неперсональные структурные данные кешируются (свежесть ≤ 30 с, asOf);
+    /// фильтрация по актуальной аудитории сотрудника выполняется на чтении.
+    /// </summary>
     public async Task<CatalogView> GetMyCatalogAsync(CancellationToken ct)
     {
         var actor = current.Actor ?? throw MotivaException.Forbidden("Требуется аутентификация");
         var employee = await SelfAsync(actor, ct);
         var season = calendar.SeasonOf(time.UtcNow);
-        var campaigns = await db.Set<Campaign>()
-            .Where(c => c.CompanyId == actor.CompanyId && c.State == CampaignState.Published && c.Season == season)
-            .ToListAsync(ct);
+        var asOf = time.UtcNow;
+        var key = $"catalog:{actor.CompanyId}:{season}";
+
+        var structural = await TryReadCatalogAsync(key, asOf, ct)
+            ?? await LoadCatalogAsync(actor.CompanyId, season, asOf, key, ct);
 
         var result = new List<CatalogItemView>();
-        var asOf = time.UtcNow;
-        foreach (var campaign in campaigns)
+        foreach (var campaign in structural.Campaigns)
         {
             if (!AudienceRules.IsIncluded(campaign.Audience, employee.Tags))
             {
                 continue;
             }
 
-            var streams = await db.Set<CampaignStream>().Where(s => s.CampaignId == campaign.Id && s.Status != ResourceStatus.Archived).ToListAsync(ct);
             var tasks = new List<CatalogTaskView>();
+            foreach (var task in campaign.Tasks)
+            {
+                if (AudienceRules.IsIncluded(task.Audience, employee.Tags))
+                {
+                    tasks.Add(new CatalogTaskView(task.TaskId, task.Code, task.Name, task.Goal));
+                }
+            }
+            if (tasks.Count > 0)
+            {
+                result.Add(new CatalogItemView(campaign.CampaignId, campaign.Code, campaign.Name, asOf, tasks));
+            }
+        }
+
+        return new CatalogView(result);
+    }
+
+    private async Task<CachedCatalog?> TryReadCatalogAsync(string key, DateTimeOffset now, CancellationToken ct)
+    {
+        var raw = await cache.ReadAsync(key, ct);
+        if (raw is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var cached = JsonSerializer.Deserialize<CachedCatalog>(raw);
+            if (cached is null || now - cached.AsOf > CatalogTtl)
+            {
+                return null; // просроченный/повреждённый снимок → miss (T06)
+            }
+
+            return cached;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<CachedCatalog> LoadCatalogAsync(Guid companyId, int season, DateTimeOffset asOf, string key, CancellationToken ct)
+    {
+        var campaigns = await db.Set<Campaign>()
+            .Where(c => c.CompanyId == companyId && c.State == CampaignState.Published && c.Season == season)
+            .ToListAsync(ct);
+        var items = new List<CachedCampaign>();
+        foreach (var campaign in campaigns)
+        {
+            var streams = await db.Set<CampaignStream>().Where(s => s.CampaignId == campaign.Id && s.Status != ResourceStatus.Archived).ToListAsync(ct);
+            var tasks = new List<CachedTask>();
             foreach (var stream in streams)
             {
                 var streamTasks = await db.Set<CampaignTask>().Where(t => t.StreamId == stream.Id && t.Status != ResourceStatus.Archived).ToListAsync(ct);
                 foreach (var task in streamTasks)
                 {
-                    if (AudienceRules.IsIncluded(task.Audience, employee.Tags))
-                    {
-                        tasks.Add(new CatalogTaskView(task.Id, task.Code, task.Name, task.Goal));
-                    }
+                    tasks.Add(new CachedTask(task.Id, task.Code, task.Name, task.Goal, task.Audience));
                 }
             }
-            if (tasks.Count > 0)
-            {
-                result.Add(new CatalogItemView(campaign.Id, campaign.Code, campaign.Name, asOf, tasks));
-            }
+            items.Add(new CachedCampaign(campaign.Id, campaign.Code, campaign.Name, campaign.Audience, tasks));
         }
-        return new CatalogView(result);
+
+        var catalog = new CachedCatalog(asOf, items);
+        try
+        {
+            // write-if-asOf-newer; просроченный снимок не перезаписывает свежий (I202)
+            await cache.WriteIfNewerAsync(key, JsonSerializer.Serialize(catalog), asOf, CatalogTtl, ct);
+        }
+        catch
+        {
+            // отказ кеша не блокирует выдачу каталога (T06: PostgreSQL fallback)
+        }
+
+        return catalog;
     }
 
     public async Task<List<ProgressView>> GetMyProgressAsync(long? taskId, Periodicity? period, CancellationToken ct)
@@ -118,7 +181,7 @@ public sealed class MeReadUseCases(IUnitOfWork db, ICurrentActor current, ICompa
         }
 
         var lines = task.Rewards.Select(r => new RewardLineView(r.ResourceId, r.Amount)).ToList();
-        return new RewardView(taskId, ev.RewardResult, lines, ev.RewardReason);
+        return new RewardView(taskId, ev.RewardResult ?? "none", lines, ev.RewardReason);
     }
 
     public async Task<List<AchievementGrant>> GetMyAchievementGrantsAsync(CancellationToken ct)
@@ -135,3 +198,8 @@ public sealed record CatalogTaskView(long TaskId, string Code, string Name, int 
 public sealed record ProgressView(long TaskId, string Period, int Value, int Goal, bool Completed);
 public sealed record RewardView(long TaskId, string Result, List<RewardLineView> Lines, string? RejectReason);
 public sealed record RewardLineView(long ResourceId, int Amount);
+
+/// <summary>Неперсональный структурный кеш каталога (T06/D209).</summary>
+internal sealed record CachedCatalog(DateTimeOffset AsOf, List<CachedCampaign> Campaigns);
+internal sealed record CachedCampaign(long CampaignId, string Code, string Name, Audience Audience, List<CachedTask> Tasks);
+internal sealed record CachedTask(long TaskId, string Code, string Name, int Goal, Audience Audience);

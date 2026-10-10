@@ -4,7 +4,7 @@ using Motiva.Domain;
 namespace Motiva.Application.UseCases;
 
 /// <summary>Начальное создание компаний и активного Admin через доверенные use cases (T03).</summary>
-public sealed class BootstrapUseCases(IUnitOfWork db, ITime time)
+public sealed class BootstrapUseCases(IUnitOfWork db)
 {
     /// <summary>Создать компанию и активного администратора (bootstrap).</summary>
     public async Task<Company> CreateCompanyAsync(string name, int adminMasterId, CancellationToken ct)

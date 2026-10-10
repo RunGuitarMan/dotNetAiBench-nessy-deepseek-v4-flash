@@ -1,0 +1,162 @@
+{
+    "metrics": {
+        "data_sent": {
+            "count": 6119048,
+            "rate": 305890.27368541446
+        },
+        "http_req_tls_handshaking": {
+            "p(95)": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0
+        },
+        "http_req_connecting": {
+            "med": 0,
+            "max": 1.278,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0.0000997969701702327,
+            "min": 0
+        },
+        "http_req_sending": {
+            "p(90)": 0.006,
+            "p(95)": 0.008,
+            "avg": 0.004499609558019799,
+            "min": 0.001,
+            "med": 0.004,
+            "max": 0.575
+        },
+        "iterations": {
+            "count": 12806,
+            "rate": 640.169981476762
+        },
+        "data_received": {
+            "count": 3690605,
+            "rate": 184492.7795164802
+        },
+        "http_req_waiting": {
+            "avg": 1.5144761830391968,
+            "min": 0.554,
+            "med": 1.1075,
+            "max": 120.904,
+            "p(90)": 4.003,
+            "p(95)": 4.406
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 12806,
+            "thresholds": {
+                "rate<0.005": false
+            },
+            "value": 0
+        },
+        "http_reqs": {
+            "count": 12806,
+            "rate": 640.169981476762
+        },
+        "vus_max": {
+            "min": 1,
+            "max": 1,
+            "value": 1
+        },
+        "http_req_duration{expected_response:true}": {
+            "min": 0.568,
+            "med": 1.121,
+            "max": 121.574,
+            "p(90)": 4.025,
+            "p(95)": 4.432499999999998,
+            "avg": 1.5312670623145488
+        },
+        "checks": {
+            "passes": 12806,
+            "fails": 0,
+            "value": 1
+        },
+        "http_req_blocked": {
+            "med": 0.001,
+            "max": 5.58,
+            "p(90)": 0.001,
+            "p(95)": 0.002,
+            "avg": 0.0014790723098547605,
+            "min": 0
+        },
+        "http_req_duration": {
+            "avg": 1.5312670623145488,
+            "min": 0.568,
+            "med": 1.121,
+            "max": 121.574,
+            "p(90)": 4.025,
+            "p(95)": 4.432499999999998,
+            "thresholds": {
+                "p(95)<200": false,
+                "p(99)<1000": false
+            }
+        },
+        "http_req_receiving": {
+            "avg": 0.012291269717319765,
+            "min": 0.006,
+            "med": 0.01,
+            "max": 0.319,
+            "p(90)": 0.021,
+            "p(95)": 0.025
+        },
+        "iteration_duration": {
+            "min": 0.587208,
+            "med": 1.1449585,
+            "max": 129.194292,
+            "p(90)": 4.059791500000001,
+            "p(95)": 4.468698,
+            "avg": 1.559335694908636
+        },
+        "vus": {
+            "value": 1,
+            "min": 1,
+            "max": 1
+        }
+    },
+    "root_group": {
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "catalog 200": {
+                    "path": "::catalog 200",
+                    "id": "eebf69297bd2d45f982329d2c19ee960",
+                    "passes": 6398,
+                    "fails": 0,
+                    "name": "catalog 200"
+                },
+                "wallet 200": {
+                    "passes": 3178,
+                    "fails": 0,
+                    "name": "wallet 200",
+                    "path": "::wallet 200",
+                    "id": "6ea6a40ce2f95c05eaaee619dc7825ff"
+                },
+                "event 201": {
+                    "name": "event 201",
+                    "path": "::event 201",
+                    "id": "1347013ea8626f7a5f7eba601e361635",
+                    "passes": 1314,
+                    "fails": 0
+                },
+                "spend 201": {
+                    "name": "spend 201",
+                    "path": "::spend 201",
+                    "id": "78a2ae3426af906aea94829c078170cd",
+                    "passes": 638,
+                    "fails": 0
+                },
+                "lb 200": {
+                    "id": "c027e82e943e8691c2ceb295b4e3a9a2",
+                    "passes": 1278,
+                    "fails": 0,
+                    "name": "lb 200",
+                    "path": "::lb 200"
+                }
+            },
+        "name": ""
+    }
+}

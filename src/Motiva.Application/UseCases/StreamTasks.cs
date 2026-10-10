@@ -323,7 +323,7 @@ public sealed record TaskPatchData(
     string? Name, string? Description, int? Goal, Periodicity? Periodicity,
     int? StreamPoints, Audience? Audience, IReadOnlyList<(long resourceId, int amount)>? Rewards, ResourceStatus? Status);
 
-public sealed class MilestoneChallengeUseCases(IUnitOfWork db, ICurrentActor current, ITime time)
+public sealed class MilestoneChallengeUseCases(IUnitOfWork db, ICurrentActor current)
 {
     private (Actor actor, bool isAdmin) Current()
     {

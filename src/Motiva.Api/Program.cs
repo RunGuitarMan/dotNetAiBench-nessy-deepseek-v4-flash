@@ -192,7 +192,7 @@ v1.MapGet("/achievement-grants", async (MeReadUseCases uc, CancellationToken ct)
 
 // ---------- Кампании ----------
 v1.MapGet("/campaigns", async (CampaignUseCases uc, int? season, string? scope, CancellationToken ct) =>
-    Results.Ok(Page(new List<CampaignDto>())));
+    Results.Ok(Page((await uc.ListAsync(scope, season, ct)).Select(CampDto).ToList())));
 v1.MapPost("/campaigns", async (CampaignCreateDto dto, CampaignUseCases uc, CancellationToken ct) =>
 {
     var c = await uc.CreateAsync(dto.Code, dto.Name, dto.Description, dto.Season, dto.Start, dto.End,
@@ -273,8 +273,8 @@ v1.MapGet("/challenges/{id:long}/own", async (long id, LeaderboardUseCases uc, C
 });
 
 // ---------- Бюджеты ----------
-v1.MapGet("/campaigns/{campaignId:long}/budgets", async (long campaignId, IUnitOfWork db, CancellationToken ct) =>
-    Results.Ok(Page(new List<BudgetDto>())));
+v1.MapGet("/campaigns/{campaignId:long}/budgets", async (long campaignId, CampaignUseCases uc, CancellationToken ct) =>
+    Results.Ok(Page((await uc.ListBudgetsAsync(campaignId, ct)).Select(b => new BudgetDto(b.CampaignId, b.ResourceId, b.Remaining)).ToList())));
 v1.MapPost("/campaigns/{campaignId:long}/budget-allocations", async (long campaignId, BudgetAllocationDto dto, EconomyUseCases uc, HttpContext http, CancellationToken ct) =>
 {
     var op = await uc.AllocateBudgetAsync(campaignId, dto.ResourceId, dto.Amount, IdemKey(http), ct);
@@ -388,6 +388,26 @@ v1.MapPost("/statements/{id:long}/download-links", async (long id, StatementUseC
 // ---------- Аудит ----------
 v1.MapGet("/audit", async (AuditUseCases uc, CancellationToken ct) =>
     Results.Ok(Page((await uc.ListAsync(ct)).Select(a => new AuditEntryDto(a.Id, a.Actor, a.Target, a.Action.ToString(), a.OccurredAt, a.Details)).ToList())));
+
+// ---------- Health (T06/T07) ----------
+app.MapGet("/health/live", () => Results.Ok(new { status = "alive" }));
+app.MapGet("/health/ready", async (IDbContextFactory<MotivaDbContext> factory, CancellationToken ct) =>
+{
+    try
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        if (await db.Database.CanConnectAsync(ct))
+        {
+            return Results.Ok(new { status = "ready" });
+        }
+    }
+    catch
+    {
+        // недоступность внешней зависимости → не готов, без ложного успеха (T07)
+    }
+
+    return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+});
 
 app.Run();
 

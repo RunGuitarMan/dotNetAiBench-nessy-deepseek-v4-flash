@@ -135,10 +135,10 @@ public sealed class StatementGeneratorService(
         // CAS Ready: только при state=forming и своём владении (D208). Атомарно через SQL.
         var updated = await db.Database.ExecuteSqlInterpolatedAsync(
             $"""
-            UPDATE statements
+            UPDATE "Statements"
             SET "State" = {StatementState.Ready}, "FileRef" = {key}
             WHERE "Id" = {statementId} AND "State" = {StatementState.Forming}
-              AND (SELECT "OwnerWorkerId" FROM statement_attempts WHERE "StatementId" = {statementId}) = {workerId}
+              AND (SELECT "OwnerWorkerId" FROM "StatementAttempts" WHERE "StatementId" = {statementId}) = {workerId}
             """, ct);
 
         return updated > 0;

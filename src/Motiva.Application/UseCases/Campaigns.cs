@@ -419,6 +419,64 @@ public sealed class CampaignUseCases(IUnitOfWork db, ICurrentActor current, ICom
             }
         }
     }
+
+    /// <summary>Список кампаний по области (B09/B11/T04): available/mine/all + фильтр сезона.</summary>
+    public async Task<List<Campaign>> ListAsync(string? scope, int? season, CancellationToken ct)
+    {
+        var (actor, isAdmin) = Current();
+        var q = db.Set<Campaign>().Where(c => c.CompanyId == actor.CompanyId);
+        if (scope == "available" || (scope is null && !isAdmin))
+        {
+            // сотрудник: опубликованные текущего сезона и в аудитории
+            var currentSeason = calendar.SeasonOf(time.UtcNow);
+            q = q.Where(c => c.State == CampaignState.Published && c.Season == (season ?? currentSeason));
+            var employee = await db.Set<Employee>().FirstOrDefaultAsync(e => e.CompanyId == actor.CompanyId && e.MasterId == actor.MasterId, ct);
+            var list = await q.OrderBy(c => c.Id).ToListAsync(ct);
+            if (employee is not null)
+            {
+                list = list.Where(c => AudienceRules.IsIncluded(c.Audience, employee.Tags)).ToList();
+            }
+
+            return list;
+        }
+
+        if (scope == "mine")
+        {
+            if (actor.MasterId is null)
+            {
+                return new List<Campaign>();
+            }
+
+            var owner = await db.Set<Employee>().FirstOrDefaultAsync(e => e.CompanyId == actor.CompanyId && e.MasterId == actor.MasterId, ct);
+            if (owner is null)
+            {
+                return new List<Campaign>();
+            }
+
+            q = q.Where(c => c.OwnerEmployeeId == owner.Id);
+        }
+
+        if (season is int s)
+        {
+            q = q.Where(c => c.Season == s);
+        }
+
+        return await q.OrderBy(c => c.Id).ToListAsync(ct);
+    }
+
+    /// <summary>Бюджеты кампании по ресурсам (B19/T04); владелец/Admin.</summary>
+    public async Task<List<Budget>> ListBudgetsAsync(long campaignId, CancellationToken ct)
+    {
+        var (actor, isAdmin) = Current();
+        var campaign = await GetOwnedAsync(actor.CompanyId, campaignId, ct);
+        var isOwner = await IsOwnerAsync(actor.CompanyId, campaignId, actor.MasterId, ct);
+        if (!isAdmin && !isOwner)
+        {
+            throw MotivaException.Forbidden("Бюджеты видит владелец кампании или Admin");
+        }
+
+        return await db.Set<Budget>().Where(b => b.CampaignId == campaignId).OrderBy(b => b.ResourceId).ToListAsync(ct);
+    }
 }
 
 /// <summary>Данные PATCH кампании (T04).</summary>
