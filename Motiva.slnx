@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Motiva.Api/Motiva.Api.csproj" />
+    <Project Path="src/Motiva.Application/Motiva.Application.csproj" />
+    <Project Path="src/Motiva.Domain/Motiva.Domain.csproj" />
+    <Project Path="src/Motiva.Infrastructure/Motiva.Infrastructure.csproj" />
+    <Project Path="src/Motiva.Worker/Motiva.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Motiva.Tests.Architecture/Motiva.Tests.Architecture.csproj" />
+    <Project Path="tests/Motiva.Tests.Integration/Motiva.Tests.Integration.csproj" />
+    <Project Path="tests/Motiva.Tests.Unit/Motiva.Tests.Unit.csproj" />
+  </Folder>
+</Solution>

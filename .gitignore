@@ -60,6 +60,7 @@ nunit-*.xml
 .local/
 __pycache__/
 *.pyc
+.DS_Store
 
 /.idea/
 /access_token.json
