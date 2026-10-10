@@ -19,9 +19,9 @@
 | B29–B33 вехи/достижения/рейтинг/финализация | `Economy.cs`, `LeaderboardStatements.cs`, worker | unit+integration |
 | B34–B37 выписки (заказ/удаление/ссылка) | `LeaderboardStatements.cs`, `StatementGenerator.cs` | integration (E2E: CSV в S3, CAS Ready, ссылка) |
 | T05 числа/время/бессрочные повторы | `DomainRules.cs`, `OperationRequest` (operation), `ProgressEvent` (event) | unit |
-| T06 кеш каталога (write-if-asOf-newer, ≤30 с) | `ICache`/`ValkeyCache`, `MeReadUseCases` | integration (каталог через кеш) |
+| T06 кеш каталога и live-рейтинга (T06) | `ICache`/`ValkeyCache`, `MeReadUseCases`, `LeaderboardUseCases` | integration (каталог и рейтинг через кеш) |
 | T07 CSV-генератор, снимок, CAS Ready | `Infrastructure/StatementGenerator.cs`, `CsvStatementWriter` | integration (E2E экспорт) |
-| T08 тесты | — | unit 21, architecture 4, integration 8 — зелёные |
+| T08 тесты | — | unit 21, architecture 4, integration 11 — зелёные |
 | T09 нагрузка | `load/motiva.js`, `load/reports/k6-smoke-summary.json` | **smoke прогон**: 12806 req, 0% ошибок, p95=4.4ms |
 | T10 поставка | `README.md`, `docker-compose.yml`, `.env.example`, `examples/requests.sh` | — |
 
@@ -33,22 +33,23 @@
 | `dotnet build Motiva.slnx` | 0 | сборка успешна, без CS-предупреждений |
 | `dotnet test tests/Motiva.Tests.Unit` | 0 | 21/21 passed |
 | `dotnet test tests/Motiva.Tests.Architecture` | 0 | 4/4 passed |
-| `dotnet test tests/Motiva.Tests.Integration` | 0 | 8/8 passed (PG17+Valkey+MinIO) |
+| `dotnet test tests/Motiva.Tests.Integration` | 0 | 11/11 passed (PG17+Valkey+MinIO) |
 | `dotnet ef database update` (на PG17) | 0 | миграция применена; schema проверена |
 | `k6 run --duration 20s load/motiva.js` (smoke) | 0 | 12806 req, 0% failed, avg 1.5ms, p95 4.4ms; отчёт `load/reports/k6-smoke-summary.json` |
 
 Интеграционные тесты сами поднимают PostgreSQL 17 / Valkey 9 / MinIO (Testcontainers), применяют миграции и
-выполняют HTTP-сценарии с подписанными JWT (E01 два ресурса, идемпотентность повтора, недостаток бюджета,
-E05 конкурентные траты, E07 возврат списания, ручное начисление+отмена+одна успешная отмена, E12 изоляция
-компаний, E2E-экспорт выписки через S3 с CAS Ready и выдачей ссылки).
+выполняют HTTP-сценарии с подписанными JWT: E01 два ресурса, E02 недостаток бюджета, E03 избыточный прогресс,
+E05 конкурентные траты, E07 возврат списания, E08 отмена пакета при нехватке одного ресурса → declined без
+частичного изъятия, E10 несколько вех (≤1 достижение/сезон), E12 изоляция компаний, идемпотентность повтора,
+ручное начисление + отмена + одна успешная отмена, E2E-экспорт выписки через S3 с CAS Ready и ссылкой.
 
 ## Известные отклонения и ограничения
 
 - **Конкурентная защита** реализована изоляцией `Serializable` + retry в `IUnitOfWork.ExecuteSerializableAsync`
   и уникальными индексами; явные `SELECT ... FOR UPDATE` по единому порядку (stage-2 §4.7) не реализованы.
   Это подход, а не ослабление бизнес-правил; часть гонок покрыта тестами (E05), часть — не покрыта.
-- **Кеш каталога (T06)** задействован в `getMyCatalog` (свежесть ≤ 30 с, write-if-asOf-newer, PostgreSQL fallback);
-  **кеш live-leaderboard (≤ 5 с)** не задействован — эндпоинт рейтинга читает PostgreSQL напрямую.
+- **Кеш T06** задействован в `getMyCatalog` (≤ 30 с) и `getLeaderboard` (≤ 5 с) — write-if-asOf-newer (I202),
+  PostgreSQL fallback при отказе кеша, фильтрация прав на чтении. Оба подтверждены интеграционными тестами.
 - **Нагрузка T09** — выполнен **smoke-прогон** (20 с, открытая модель) против живого API на PG17/Valkey/MinIO:
   12806 запросов, 0% ошибок, p95≈4.4 ms (отчёт `load/reports/k6-smoke-summary.json`). Полный профиль 300 с
   на подготовленном наборе данных (10k сотрудников) не выполнялся.

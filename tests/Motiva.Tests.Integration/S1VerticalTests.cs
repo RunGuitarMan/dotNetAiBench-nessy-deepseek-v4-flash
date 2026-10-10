@@ -597,4 +597,181 @@ public class S1VerticalTests : IClassFixture<MotivaFactory>
             Assert.Equal(HttpStatusCode.NotFound, ores.StatusCode);
         }
     }
+
+    /// <summary>Настроить опубликованную кампанию с заданием и grant progress; возвращает (campaignId, taskId, service-клиент).</summary>
+    private async Task<(long campaignId, long taskId, HttpClient service)> SetupPublishedTaskAsync(
+        string company, long resourceId, int goal, int streamPoints, int rewardAmount,
+        IReadOnlyList<(int threshold, long achievementId)>? milestones = null, CancellationToken ct = default)
+    {
+        var admin = Admin(company);
+        var now = DateTimeOffset.UtcNow;
+        var campaign = await Post(admin, "/api/v1/campaigns", new
+        {
+            code = "C",
+            name = "C",
+            season = now.Year,
+            start = new DateTimeOffset(now.Year, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            end = new DateTimeOffset(now.Year, 12, 31, 23, 59, 59, TimeSpan.Zero),
+            audience = new { any = Array.Empty<string>(), all = Array.Empty<string>(), none = Array.Empty<string>() },
+            resources = new[] { new { resourceId, allocationRequested = true } },
+        });
+        var campaignId = campaign.GetProperty("id").GetInt64();
+        var stream = (await Post(admin, $"/api/v1/campaigns/{campaignId}/streams", new { code = "s", name = "s" })).GetProperty("id").GetInt64();
+        var task = await Post(admin, $"/api/v1/streams/{stream}/tasks", new
+        {
+            code = "t",
+            name = "t",
+            goal,
+            periodicity = "month",
+            streamPoints,
+            audience = new { any = Array.Empty<string>(), all = Array.Empty<string>(), none = Array.Empty<string>() },
+            rewards = rewardAmount > 0 ? new[] { new { resourceId, amount = rewardAmount } } : Array.Empty<object>(),
+        });
+        var taskId = task.GetProperty("id").GetInt64();
+        // вехи создаются до публикации (B09)
+        if (milestones is not null)
+        {
+            foreach (var (threshold, achievementId) in milestones)
+            {
+                await Post(admin, $"/api/v1/streams/{stream}/milestones", new { threshold, achievementId });
+            }
+        }
+
+        await Post(admin, $"/api/v1/campaigns/{campaignId}/budget-allocations", new { resourceId, amount = 100 }, idem: "x1");
+        var campRes = await admin.GetAsync($"/api/v1/campaigns/{campaignId}");
+        var etag = campRes.Headers.ETag!.Tag;
+        using (var patch = new HttpRequestMessage(HttpMethod.Patch, $"/api/v1/campaigns/{campaignId}") { Content = JsonContent.Create(new { status = "published" }) })
+        { patch.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(etag!)); var r = await admin.SendAsync(patch); Assert.Equal(HttpStatusCode.OK, r.StatusCode); }
+        var integration = (await Post(admin, "/api/v1/integrations", new { name = "src", serviceSub = "p-src" })).GetProperty("id").GetInt64();
+        var getres = await admin.GetAsync($"/api/v1/integrations/{integration}/grants");
+        var getag = getres.Headers.ETag!.Tag;
+        using (var put = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/integrations/{integration}/grants")
+        { Content = JsonContent.Create(new { grants = new[] { new { kind = "progress", campaignId } } }) })
+        { put.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(getag!)); await admin.SendAsync(put); }
+        var service = _factory.Client(company, "service", subject: "p-src");
+        return (campaignId, taskId, service);
+    }
+
+    [Fact]
+    public async Task E03_Excess_increase_credited_to_goal_once()
+    {
+        var company = await BootstrapAsync();
+        var admin = Admin(company);
+        var a = (await Post(admin, "/api/v1/resources", new { code = "A", name = "A" })).GetProperty("id").GetInt64();
+        var emp = (await Post(admin, "/api/v1/employees", new { masterId = 31, tags = Array.Empty<string>() })).GetProperty("id").GetInt64();
+        var (_, taskId, service) = await SetupPublishedTaskAsync(company, a, goal: 5, streamPoints: 1, rewardAmount: 5);
+
+        // избыточный прогресс 10 при цели 5 → засчитано 5, завершение, награда один раз
+        var e1 = await Post(service, "/internal/v1/events", new { employeeId = emp, taskId, increase = 10, sourceEventNo = "e1" });
+        Assert.Equal(5, e1.GetProperty("creditedIncrease").GetInt32());
+        Assert.True(e1.GetProperty("completed").GetBoolean());
+        // повторное событие в том же периоде после завершения → 0
+        var e2 = await Post(service, "/internal/v1/events", new { employeeId = emp, taskId, increase = 3, sourceEventNo = "e2" });
+        Assert.Equal(0, e2.GetProperty("creditedIncrease").GetInt32());
+        var employee = _factory.Client(company, "user", masterId: 31);
+        var wallet = await Get(employee, "/api/v1/wallet");
+        Assert.Equal(5, wallet.GetProperty("balances")[0].GetProperty("balance").GetInt64());
+        var progress = await Get(employee, "/api/v1/me/progress");
+        Assert.Equal(5, progress.GetProperty("items")[0].GetProperty("value").GetInt32());
+    }
+
+    [Fact]
+    public async Task E10_Multiple_milestones_grant_achievements_at_most_once_per_season()
+    {
+        var company = await BootstrapAsync();
+        var admin = Admin(company);
+        var a = (await Post(admin, "/api/v1/resources", new { code = "A", name = "A" })).GetProperty("id").GetInt64();
+        var emp = (await Post(admin, "/api/v1/employees", new { masterId = 32, tags = Array.Empty<string>() })).GetProperty("id").GetInt64();
+        var ach1 = (await Post(admin, "/api/v1/achievements", new { code = "ACH-1", name = "a1" })).GetProperty("id").GetInt64();
+        var ach2 = (await Post(admin, "/api/v1/achievements", new { code = "ACH-2", name = "a2" })).GetProperty("id").GetInt64();
+        // две вехи (порог 3 → ach1, порог 5 → ach2) до публикации
+        var (_, taskId, service) = await SetupPublishedTaskAsync(company, a, goal: 1, streamPoints: 5, rewardAmount: 0,
+            milestones: new[] { (3, ach1), (5, ach2) });
+
+        var ev = await Post(service, "/internal/v1/events", new { employeeId = emp, taskId, increase = 1, sourceEventNo = "e1" });
+        Assert.True(ev.GetProperty("completed").GetBoolean());
+
+        var employee = _factory.Client(company, "user", masterId: 32);
+        var grants = await Get(employee, "/api/v1/achievement-grants");
+        var grantAch = grants.GetProperty("items").EnumerateArray().Select(x => x.GetProperty("achievementId").GetInt64()).ToHashSet();
+        Assert.Contains(ach1, grantAch);
+        Assert.Contains(ach2, grantAch);
+        // ≤1 на сезон: повторное событие не добавляет
+        Assert.Equal(2, grantAch.Count);
+    }
+
+    [Fact]
+    public async Task E08_Partial_cancellation_declined_no_partial_withdraw()
+    {
+        var company = await BootstrapAsync();
+        var admin = Admin(company);
+        var a = (await Post(admin, "/api/v1/resources", new { code = "A", name = "A" })).GetProperty("id").GetInt64();
+        var b = (await Post(admin, "/api/v1/resources", new { code = "B", name = "B" })).GetProperty("id").GetInt64();
+        var emp = (await Post(admin, "/api/v1/employees", new { masterId = 33, tags = Array.Empty<string>() })).GetProperty("id").GetInt64();
+        var now = DateTimeOffset.UtcNow;
+        var campaign = await Post(admin, "/api/v1/campaigns", new
+        {
+            code = "C",
+            name = "C",
+            season = now.Year,
+            start = new DateTimeOffset(now.Year, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            end = new DateTimeOffset(now.Year, 12, 31, 23, 59, 59, TimeSpan.Zero),
+            audience = new { any = Array.Empty<string>(), all = Array.Empty<string>(), none = Array.Empty<string>() },
+            resources = new[] { new { resourceId = a, allocationRequested = true }, new { resourceId = b, allocationRequested = true } },
+        });
+        var campaignId = campaign.GetProperty("id").GetInt64();
+        var stream = (await Post(admin, $"/api/v1/campaigns/{campaignId}/streams", new { code = "s", name = "s" })).GetProperty("id").GetInt64();
+        var task = await Post(admin, $"/api/v1/streams/{stream}/tasks", new
+        {
+            code = "t",
+            name = "t",
+            goal = 1,
+            periodicity = "month",
+            streamPoints = 1,
+            audience = new { any = Array.Empty<string>(), all = Array.Empty<string>(), none = Array.Empty<string>() },
+            rewards = new[] { new { resourceId = a, amount = 10 }, new { resourceId = b, amount = 2 } },
+        });
+        var taskId = task.GetProperty("id").GetInt64();
+        await Post(admin, $"/api/v1/campaigns/{campaignId}/budget-allocations", new { resourceId = a, amount = 10 }, idem: "x1");
+        await Post(admin, $"/api/v1/campaigns/{campaignId}/budget-allocations", new { resourceId = b, amount = 2 }, idem: "x2");
+        var campRes = await admin.GetAsync($"/api/v1/campaigns/{campaignId}");
+        var etag = campRes.Headers.ETag!.Tag;
+        using (var patch = new HttpRequestMessage(HttpMethod.Patch, $"/api/v1/campaigns/{campaignId}") { Content = JsonContent.Create(new { status = "published" }) })
+        { patch.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(etag!)); var r = await admin.SendAsync(patch); Assert.Equal(HttpStatusCode.OK, r.StatusCode); }
+        var integration = (await Post(admin, "/api/v1/integrations", new { name = "src", serviceSub = "p-src" })).GetProperty("id").GetInt64();
+        var getres = await admin.GetAsync($"/api/v1/integrations/{integration}/grants");
+        var getag = getres.Headers.ETag!.Tag;
+        using (var put = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/integrations/{integration}/grants")
+        { Content = JsonContent.Create(new { grants = new[] { new { kind = "progress", campaignId } } }) })
+        { put.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(getag!)); await admin.SendAsync(put); }
+        var service = _factory.Client(company, "service", subject: "p-src");
+        var ev = await Post(service, "/internal/v1/events", new { employeeId = emp, taskId, increase = 1, sourceEventNo = "e1" });
+        Assert.Equal("granted", ev.GetProperty("reward").GetProperty("result").GetString());
+        // получить id операции награды (TaskReward)
+        long rewardOp;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Motiva.Infrastructure.MotivaDbContext>();
+            rewardOp = (await db.Operations.Where(o => o.CompanyId == Guid.Parse(company) && o.Kind == Motiva.Domain.OperationKind.TaskReward).Select(o => o.Id).FirstAsync());
+        }
+
+        // тратим весь A (10), оставляя B=2 → отмена пакета не может списать A → declined
+        var employee = _factory.Client(company, "user", masterId: 33);
+        var ps = (await Post(admin, "/api/v1/purchase-systems", new { name = "shop" })).GetProperty("id").GetInt64();
+        var psRes = await admin.GetAsync($"/api/v1/purchase-systems/{ps}");
+        var psEtag = psRes.Headers.ETag!.Tag;
+        using (var putRes = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/purchase-systems/{ps}/resources") { Content = JsonContent.Create(new[] { a }) })
+        { putRes.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(psEtag!)); await admin.SendAsync(putRes); }
+        await Post(employee, "/api/v1/spends", new { resourceId = a, amount = 10, purchaseSystemId = ps, basis = "buy-all" }, idem: "sp1");
+
+        var cancel = await Post(admin, "/api/v1/accrual-cancellations", new { originalOperationId = rewardOp, basis = "undo" }, idem: "c1");
+        Assert.Equal("declined", cancel.GetProperty("status").GetString());
+
+        // кошелёк не изменился (нет частичного изъятия B)
+        var wallet = await Get(employee, "/api/v1/wallet");
+        var bal = wallet.GetProperty("balances").EnumerateArray()
+            .ToDictionary(x => x.GetProperty("code").GetString()!, x => x.GetProperty("balance").GetInt64());
+        Assert.Equal(0, bal.GetValueOrDefault("A", 0));
+        Assert.Equal(2, bal.GetValueOrDefault("B", 0));
+    }
 }

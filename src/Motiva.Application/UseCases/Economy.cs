@@ -201,6 +201,7 @@ public sealed class EconomyUseCases(
             var rewardOp = (Operation?)null;
             var rewardResult = "none";
             string? rewardReason = null;
+            long achievedStreamPoints = 0;
 
             if (completed && !await db.Set<Completion>().AnyAsync(c => c.EmployeeId == employeeId && c.TaskId == taskId && c.PeriodStart == periodStart, inner))
             {
@@ -217,6 +218,7 @@ public sealed class EconomyUseCases(
                         throw MotivaException.Validation("Очки превышают 1e15");
                     }
 
+                    achievedStreamPoints = score.Points;
                     if (isNewScore)
                     {
                         db.Add(score);
@@ -226,8 +228,8 @@ public sealed class EconomyUseCases(
                         db.Update(score);
                     }
                 }
-                // вехи → достижения (B29/B30)
-                await GrantMilestonesAsync(employeeId, stream.Id, campaign.Season, inner);
+                // вехи → достижения (B29/B30) — по достигнутым очкам, без повторного чтения несохранённого счёта
+                await GrantMilestonesAsync(employeeId, stream.Id, campaign.Season, achievedStreamPoints, inner);
                 // награда (B20)
                 if (task.Rewards.Count > 0)
                 {
@@ -264,15 +266,14 @@ public sealed class EconomyUseCases(
         }, ct);
     }
 
-    private async Task GrantMilestonesAsync(long employeeId, long streamId, int season, CancellationToken ct)
+    private async Task GrantMilestonesAsync(long employeeId, long streamId, int season, long achievedPoints, CancellationToken ct)
     {
-        var score = await db.Set<StreamScore>().FirstOrDefaultAsync(s => s.EmployeeId == employeeId && s.StreamId == streamId && s.Season == season, ct);
-        if (score is null)
+        if (achievedPoints <= 0)
         {
             return;
         }
 
-        var milestones = await db.Set<Milestone>().Where(m => m.StreamId == streamId && m.Threshold <= score.Points).ToListAsync(ct);
+        var milestones = await db.Set<Milestone>().Where(m => m.StreamId == streamId && m.Threshold <= achievedPoints).ToListAsync(ct);
         foreach (var m in milestones)
         {
             if (!await db.Set<AchievementGrant>().AnyAsync(a => a.EmployeeId == employeeId && a.AchievementId == m.AchievementId && a.Season == season, ct))

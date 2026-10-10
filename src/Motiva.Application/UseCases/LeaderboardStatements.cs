@@ -1,10 +1,13 @@
+using System.Text.Json;
 using Motiva.Application.Ports;
 using Motiva.Domain;
 
 namespace Motiva.Application.UseCases;
 
-public sealed class LeaderboardUseCases(IUnitOfWork db, ICurrentActor current, ITime time)
+public sealed class LeaderboardUseCases(IUnitOfWork db, ICurrentActor current, ITime time, ICache cache)
 {
+    private static readonly TimeSpan LbTtl = TimeSpan.FromSeconds(5); // обязательное T06
+
     private async Task<Challenge> GetChallengeAsync(long challengeId, CancellationToken ct)
     {
         var actor = current.Actor ?? throw MotivaException.Forbidden("Требуется аутентификация");
@@ -18,29 +21,81 @@ public sealed class LeaderboardUseCases(IUnitOfWork db, ICurrentActor current, I
 
     public async Task<LeaderboardView> GetLeaderboardAsync(long challengeId, int limit, CancellationToken ct)
     {
-        var challenge = await GetChallengeAsync(challengeId, ct);
+        await GetChallengeAsync(challengeId, ct); // доступ к компании
         if (limit is < 1 or > 100)
         {
             limit = 50;
         }
 
+        var key = $"lb:{challengeId}:top:{limit}";
+        var asOf = time.UtcNow;
+
+        // T06: live-рейтинг (≤ 5 с), неперсональные данные; отказ кеша → PostgreSQL
+        var cached = await TryReadLbAsync(key, asOf, ct);
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        var view = await ComputeLeaderboardAsync(challengeId, limit, asOf, ct);
+        try
+        {
+            await cache.WriteIfNewerAsync(key, JsonSerializer.Serialize(view), asOf, LbTtl, ct);
+        }
+        catch
+        {
+            // fallback: не блокируем чтение
+        }
+
+        return view;
+    }
+
+    private async Task<LeaderboardView?> TryReadLbAsync(string key, DateTimeOffset now, CancellationToken ct)
+    {
+        var raw = await cache.ReadAsync(key, ct);
+        if (raw is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var cached = JsonSerializer.Deserialize<LeaderboardView>(raw);
+            if (cached is null || now - cached.AsOf > LbTtl)
+            {
+                return null; // просроченный снимок → miss
+            }
+
+            return cached;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<LeaderboardView> ComputeLeaderboardAsync(long challengeId, int limit, DateTimeOffset asOf, CancellationToken ct)
+    {
         var rows = await db.Set<ChallengeScore>().Where(s => s.ChallengeId == challengeId)
             .OrderByDescending(s => s.Score).ThenBy(s => s.EmployeeId)
             .Take(limit).ToListAsync(ct);
         var employees = await db.Set<Employee>().Where(e => rows.Select(r => r.EmployeeId).Contains(e.Id))
             .ToDictionaryAsync(e => e.Id, ct);
         var top = new List<RatingRowView>();
-        long? lastScore = null; int place = 0; int basePlace = 1;
+        long? lastScore = null; int basePlace = 1;
         var i = 0;
         foreach (var row in rows)
         {
             i++;
-            if (lastScore != row.Score) { basePlace = i; lastScore = row.Score; }
-            place = basePlace;
+            if (lastScore != row.Score)
+            {
+                basePlace = i;
+                lastScore = row.Score;
+            }
             var masterId = employees.GetValueOrDefault(row.EmployeeId)?.MasterId ?? 0;
-            top.Add(new RatingRowView(masterId, row.Score, place));
+            top.Add(new RatingRowView(masterId, row.Score, basePlace));
         }
-        return new LeaderboardView(limit, top, time.UtcNow);
+        return new LeaderboardView(limit, top, asOf);
     }
 
     public async Task<OwnRatingView> GetOwnRatingAsync(long challengeId, CancellationToken ct)
